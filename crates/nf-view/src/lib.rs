@@ -21,7 +21,9 @@ pub mod gpu;
 #[cfg(feature = "gamepad")]
 pub mod gamepad;
 pub mod dev;
+#[cfg(not(target_os = "android"))]
 pub mod devwin;
+pub mod driving;
 pub mod hud;
 pub mod credits;
 pub mod fe_pages;
@@ -46,6 +48,7 @@ pub mod woman;
 pub mod loading;
 pub mod async_load;
 /// The launcher (`NightfirePort` binary): pick the disc image once, then PLAY.
+#[cfg(not(target_os = "android"))]
 pub mod launcher;
 /// The weapon matrix: every on-foot level × every weapon, measured headless.
 pub mod matrix;
@@ -72,10 +75,15 @@ pub fn phases_take() -> Vec<(&'static str, f64)> {
 thread_local! {
     static LOAD_PHASES: std::cell::RefCell<Vec<(&'static str, f64)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+#[cfg(not(target_os = "android"))]
 use winit::application::ApplicationHandler;
+#[cfg(not(target_os = "android"))]
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+#[cfg(not(target_os = "android"))]
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+#[cfg(not(target_os = "android"))]
 use winit::keyboard::{KeyCode, PhysicalKey};
+#[cfg(not(target_os = "android"))]
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Radians per mouse count. Mouse deltas go straight into yaw/pitch (docs/systems/input.md §8).
@@ -95,7 +103,7 @@ pub fn mouse_look_add(turn: &mut f32, look: &mut f32, dx: f64, dy: f64, zoom: f3
 }
 
 /// The game's vertical field of view in play (60°, docs/systems/player.md).
-const GAME_FOV: f32 = std::f32::consts::FRAC_PI_3;
+pub const GAME_FOV: f32 = std::f32::consts::FRAC_PI_3;
 
 /// The first-person view angle. Mounting a deck gun narrows it to 30° in single player [M GunImp_Activate
 /// 0x132f00: `Camera_CalcViewAngles(0x3f060a92)`, 0x3f860a92 when MPSettings says multiplayer]; dismounting
@@ -416,7 +424,7 @@ impl Camera {
     /// The near plane is the game's Ps2Near2 = 0.1 [L ee_start_05.bin; docs/systems/render.md — the
     /// PS2WorldViewVU1Kick2 0x10b2b0 depth mapping's n, f = 2^24 far; the ZBUF range N1/F1 saturates
     /// ≈ 0.114]; the port's older 0.05 showed 5 cm more near content than the game.
-    fn view_proj(&self, aspect: f32) -> ([[f32; 4]; 4], [[f32; 4]; 4]) {
+    pub fn view_proj(&self, aspect: f32) -> ([[f32; 4]; 4], [[f32; 4]; 4]) {
         let (near, far, f) = (0.1f32, 4000.0f32, 1.0 / (self.fov * 0.5).tan());
         let proj = Mat4::from_cols_array_2d(&[[f / aspect, 0.0, 0.0, 0.0], [0.0, f, 0.0, 0.0], [0.0, 0.0, far / (near - far), -1.0], [0.0, 0.0, near * far / (near - far), 0.0]]);
         let fw = self.dir().normalize();
@@ -2131,12 +2139,14 @@ fn menu_music_files(iso_path: &str, track: i32) -> Option<(i32, nf_formats::musi
 /// two keys are the game's own two bindings: ArrowDown is the mask's D-pad-down half, R the R1
 /// half. The viewer's dedicated keys (Esc, F1/F2/F11/F12) keep their own functions;
 /// `--skip-cutscenes` is the dev override and bypasses this.
+#[cfg(not(target_os = "android"))]
 pub fn cutscene_skip_key(k: winit::keyboard::KeyCode) -> bool {
     matches!(k, winit::keyboard::KeyCode::ArrowDown | winit::keyboard::KeyCode::KeyR)
 }
 
 /// The dev menu's type-to-filter lane: a physical key → the ASCII char it types into the filter
 /// (lowercase; the HUD font has only ASCII glyphs anyway, `dev::fit`).
+#[cfg(not(target_os = "android"))]
 fn dev_filter_char(k: winit::keyboard::KeyCode) -> Option<char> {
     use winit::keyboard::KeyCode as K;
     Some(match k {
@@ -2163,7 +2173,7 @@ fn posed_vertices(scene: &scene::Scene, choice: Option<usize>, time: f32, opts: 
 /// leaf's object onto the destroyed glist entry — the block-0x27 LOD pointer or the parsemap
 /// fallback slot [M 0x12bbb8 asm + 0x1d1b68]; the C5 leaves' fallback slot is undrawable [D
 /// lod_word −1] and the doorway ends open [L], so the dead leaf's static materials stop drawing.
-fn dead_destroy_centres(scene: &scene::Scene) -> Vec<[u32; 3]> {
+pub fn dead_destroy_centres(scene: &scene::Scene) -> Vec<[u32; 3]> {
     let Some(sim) = scene.sim.as_ref() else { return Vec::new() };
     scene.destroy_centres.iter()
         // The pair carries the leaf's PLACEMENT index, not its slot in `props.destroy`.
@@ -2179,7 +2189,7 @@ fn dead_destroy_centres(scene: &scene::Scene) -> Vec<[u32; 3]> {
 /// whose Destroy leaf is dead — the only wreck draws that render (the game's `Destroy_Smash`
 /// 0x12bb60 swaps the dead leaf's object onto the destroyed glist; the live object never shows
 /// it). Consumed as `Renderer::destroy_wreck_draw`, matched against `Renderer::destroy_wreck_all`.
-fn wreck_draw_centres(scene: &scene::Scene) -> Vec<[u32; 3]> {
+pub fn wreck_draw_centres(scene: &scene::Scene) -> Vec<[u32; 3]> {
     let Some(sim) = scene.sim.as_ref() else { return Vec::new() };
     scene.destroy_wrecks.iter()
         .filter(|(_, pl)| sim.drones.props.destroy.iter().any(|d| d.placement == *pl && d.latched))
@@ -2199,7 +2209,7 @@ fn destroy_tints(scene: &scene::Scene) -> Vec<([u32; 3], [u8; 2])> {
 }
 
 /// The snow quads facing the camera (`DrawDrops` → `psiDrawParticleList` with the flake texture).
-fn snow_for(scene: &scene::Scene, cam: &Camera) -> Vec<scene::Vertex> {
+pub fn snow_for(scene: &scene::Scene, cam: &Camera) -> Vec<scene::Vertex> {
     let Some(sim) = scene.sim.as_ref() else { return Vec::new() };
     let (right, up) = billboard_axes(cam);
     sim.snow_quads(right, up)
@@ -2308,6 +2318,24 @@ pub fn sound_tick(s: &mut nf_audio::sfx::Sound, sim: &mut scene::Sim) {
 /// other backend keeps the default instance. The Vulkan-only instance must offer the very adapter
 /// the default instance picks (backend, name, vendor, device), else the default stands.
 /// `NF_INDIRECT_VALIDATION=1` keeps the check everywhere.
+/// Headless `wgpu::Instance` (no window), matching `gpu_instance`'s Vulkan indirect-validation opt-out.
+pub fn gpu_instance_headless() -> wgpu::Instance {
+    let default = || wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let inst = default();
+    if std::env::var_os("NF_INDIRECT_VALIDATION").is_some() { return inst; }
+    let info = |i: &wgpu::Instance| pollster::block_on(i.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        .ok().map(|a| { let i = a.get_info(); (i.backend, i.name, i.vendor, i.device) });
+    let Some(want) = info(&inst) else { return inst };
+    if want.0 != wgpu::Backend::Vulkan { return inst; }
+    let mut d = wgpu::InstanceDescriptor::new_without_display_handle();
+    d.backends = wgpu::Backends::VULKAN;
+    d.flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+    let inst2 = wgpu::Instance::new(d);
+    if info(&inst2).as_ref() != Some(&want) { return default(); }
+    inst2
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn gpu_instance(window: Option<&Arc<Window>>) -> (wgpu::Instance, Option<wgpu::Surface<'static>>) {
     let default = || {
         let inst = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -2333,7 +2361,7 @@ pub fn gpu_instance(window: Option<&Arc<Window>>) -> (wgpu::Instance, Option<wgp
     (inst2, surf2)
 }
 
-async fn device(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+pub async fn device(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { compatible_surface: surface, ..Default::default() }).await?;
     // Player bug reports carry the GPU and its driver (bugreport.rs).
     let _ = bugreport::GPU_INFO.set({ let i = adapter.get_info(); format!("{} ({:?}; driver {} {})", i.name, i.backend, i.driver, i.driver_info) });
@@ -2543,7 +2571,7 @@ pub fn shot_hud(scene: &scene::Scene, aspect: f32, menu: Option<&gpu::HudFrame>,
 }
 
 /// The camera's screen axes for the corona billboards (same basis as the snow quads).
-fn cam_axes(cam: &Camera) -> ([f32; 3], [f32; 3]) {
+pub fn cam_axes(cam: &Camera) -> ([f32; 3], [f32; 3]) {
     let f = cam.dir();
     let right = cam.right();
     let up = right.cross(f).normalize_or_zero();
@@ -2925,9 +2953,13 @@ fn shot_screen_pos() -> (i32, i32) {
     (it.next().unwrap_or(0).clamp(-0x1b0, 0x1b0), it.next().unwrap_or(0).clamp(-0x30, 0x30))
 }
 
-fn shot(scene: &scene::Scene, cam: &Camera, out: &str, choice: Option<usize>, time: f32, mut opts: scene::ViewOpts, notex: bool, nofog: bool, menu: Option<&gpu::HudFrame>, movie: Option<&(u32, u32, Vec<u8>)>) -> Result<()> {
+fn shot(scene: &scene::Scene, cam: &Camera, out: &str, choice: Option<usize>, time: f32, opts: scene::ViewOpts, notex: bool, nofog: bool, menu: Option<&gpu::HudFrame>, movie: Option<&(u32, u32, Vec<u8>)>) -> Result<()> {
+    shot_with_driving(scene, cam, out, choice, time, opts, notex, nofog, menu, movie, None)
+}
+
+fn shot_with_driving(scene: &scene::Scene, cam: &Camera, out: &str, choice: Option<usize>, time: f32, mut opts: scene::ViewOpts, notex: bool, nofog: bool, menu: Option<&gpu::HudFrame>, movie: Option<&(u32, u32, Vec<u8>)>, driving: Option<&driving::DrivingState>) -> Result<()> {
     let (w, h) = (1280u32, 720u32);
-    let (instance, _) = gpu_instance(None);
+    let instance = gpu_instance_headless();
     let (_adapter, device, queue) = pollster::block_on(device(&instance, None))?;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     // fix-sentinel-camera-play: the headless renders show the ride too — a `--frame N` shot taken
@@ -2966,8 +2998,11 @@ fn shot(scene: &scene::Scene, cam: &Camera, out: &str, choice: Option<usize>, ti
     // cel's hole nodes with the cel only) — the window does the same per frame.
     let shot_pal = SHOT_PALETTE.lock().unwrap().take();
     let decal_cells = scene.decal_cell_entries(&r.skin_layout);
-    if shot_pal.is_some() || (vis_shot.is_some() && !decal_cells.is_empty()) {
+    if driving.is_some() || shot_pal.is_some() || (vis_shot.is_some() && !decal_cells.is_empty()) {
         let mut p = shot_pal.unwrap_or_else(|| scene.skin_palette(&r.skin_layout, choice, time, opts, None).0);
+        if let Some(drv) = driving {
+            drv.apply_to_palette(r.skin_layout.attach_base as usize, &mut p);
+        }
         if let Some(v) = vis_shot.as_deref() { scene.hide_unseen_decals(&mut p, &decal_cells, v); }
         r.upload_palette(&queue, &p);
     }
@@ -3003,7 +3038,10 @@ fn shot(scene: &scene::Scene, cam: &Camera, out: &str, choice: Option<usize>, ti
     let depth = gpu::depth_view(&device, w, h);
     let (vp, vp_rot) = cam.view_proj(proj_aspect);
     let snow = snow_for(scene, cam);
-    let hud_owned = shot_hud(scene, proj_aspect, menu, movie.is_some());
+    let mut hud_owned = shot_hud(scene, proj_aspect, menu, movie.is_some());
+    if let Some(drv) = driving {
+        hud_owned.append(&driving::driving_hud(drv, proj_aspect));
+    }
     let hud = &hud_owned;
     let movie_arg = movie.map(|(w, h, rgba)| (*w, *h, rgba.as_slice()));
     r.set_shards(&queue, &scene.shard_draws());
@@ -3026,6 +3064,7 @@ fn shot(scene: &scene::Scene, cam: &Camera, out: &str, choice: Option<usize>, ti
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 struct Gfx {
     window: Arc<Window>,
     instance: wgpu::Instance,
@@ -3041,10 +3080,14 @@ struct Gfx {
     adapter: wgpu::Adapter,
 }
 
+#[cfg(not(target_os = "android"))]
 struct App {
     /// The sound driver and output (none without a device or bank).
     sound: Option<nf_audio::sfx::Sound>,
     scene: scene::Scene,
+    driving: Option<driving::DrivingState>,
+    driving_end_ticks: Option<u32>,
+    pending_drive_return: Option<nf_game::ptp::DriveReturn>,
     cam: Camera,
     gfx: Option<Gfx>,
     keys: HashSet<KeyCode>,
@@ -3354,7 +3397,7 @@ struct App {
 
 /// A running level load plus what its swap needs (async-level-load).
 struct LevelLoad {
-    job: async_load::Job<Result<scene::Scene, String>>,
+    job: async_load::Job<Result<(scene::Scene, Option<driving::DrivingState>), String>>,
     /// The level code the load serves (`pending_level`'s value at spawn): the loading screen's
     /// picture and the failure log read it.
     next: u32,
@@ -3362,7 +3405,7 @@ struct LevelLoad {
     /// spawn and applied to the NEW one at the swap (see `swap_in_scene`).
     ptp_return: Option<nf_game::ptp::DriveReturn>,
     /// The finished build, parked while the loading screen's minimum time runs (`LOADING_HOLD`).
-    ready: Option<Option<Result<scene::Scene, String>>>,
+    ready: Option<Option<Result<(scene::Scene, Option<driving::DrivingState>), String>>>,
 }
 
 /// The loading screen's minimum time on screen. The PS2's disc load kept it up ~11.5 s on
@@ -3414,6 +3457,7 @@ impl NetEndWait {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl App {
     /// net-consolidate: an online match starting adopts the lobby's session as the lockstep
     /// gate. `has_match` is exact: match_start is Some only after the host's arm / the client's
@@ -4032,7 +4076,10 @@ impl App {
         // the NEW one at the swap: the mission status (`Mission_SetStatus` 6/3/2 from PTP
         // +0x978) and the 12 `PlrStats` driving slots (`PlrStats_SetDrivingData`
         // 0x1c8560's call). The resume level itself is the return's 0x07000048 [M tail].
-        let ptp_return = self.scene.sim.as_ref().and_then(|s| s.drones.driving_return);
+        let ptp_return = self
+            .pending_drive_return
+            .take()
+            .or_else(|| self.scene.sim.as_ref().and_then(|s| s.drones.driving_return));
         self.draw_loading_screen(next, 0);
         let iso = self.iso.clone();
         let all = self.all;
@@ -4052,10 +4099,19 @@ impl App {
         // word comes from the stashed session.
         let bonus = self.fe.as_ref().map_or_else(|| self.profile_session.bonus_bits(), |fe| fe.bonus_bits());
         let job = async_load::Job::spawn(move || {
-            if let Some(st) = mp_settings {
+            if let Some(viv) = driving::driving_viv_for_level(next) {
+                driving::load_driving_scene(&iso, viv)
+                    .map(|(sc, drv)| (sc, Some(drv)))
+                    .map_err(|e| e.to_string())
+            } else if let Some(st) = mp_settings {
                 load_mp_carry(&iso, &name, all, save.as_ref(), st)
-            } else { load_front_end(&iso, &name, all, save.as_ref(), dev, difficulty, bonus) }
-                .map_err(|e| e.to_string())
+                    .map(|sc| (sc, None))
+                    .map_err(|e| e.to_string())
+            } else {
+                load_front_end(&iso, &name, all, save.as_ref(), dev, difficulty, bonus)
+                    .map(|sc| (sc, None))
+                    .map_err(|e| e.to_string())
+            }
         });
         self.async_load = Some(LevelLoad { job, next, ptp_return, ready: None });
     }
@@ -4084,9 +4140,15 @@ impl App {
         let mut load = self.async_load.take().unwrap();
         let res = load.ready.take().unwrap();
         match res {
-            Some(Ok(scene)) => {
+            Some(Ok((scene, drv))) => {
                 let name = level_archive_name(load.next);
+                self.driving = drv;
+                self.driving_end_ticks = None;
                 self.swap_in_scene(scene, load.ptp_return);
+                if let Some(drv) = &self.driving {
+                    let (p, yaw, pitch) = drv.chase_camera();
+                    self.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: GAME_FOV };
+                }
                 // The level now running (GameState+0xc [M ResetMap_Load phase 2]). It was only ever
                 // set from the command line, so a mission reached through the menus still read as the
                 // front end: Esc found "no mission", released the mouse, and the next Esc quit the
@@ -4114,6 +4176,16 @@ impl App {
                 // `menu_movie` [M 0x21b908:125] so the first page enter restarts the pair. The
                 // port keeps every bank resident, so the flip re-points the driver's primary slot.
                 if load.next == menu::FRONTEND_LEVEL {
+                    if self.fe.is_none() {
+                        let mut fe = menu::FrontEnd::new();
+                        Self::inherit_music_statics(&mut fe, self.music_bank_flip, self.music_loaded_bank, self.music_master);
+                        let (opts, warn) = settings::load_default();
+                        if let Some(w) = warn { eprintln!("[settings] {w}"); }
+                        fe.set_opts(opts);
+                        (fe.screen_x, fe.screen_y) = self.screen_pos;
+                        self.inherit_profile_session(&mut fe);
+                        self.fe = Some(fe);
+                    }
                     if let Some(fe) = self.fe.as_mut() {
                         let hash = fe.music.front_end_sound_ready();
                         fe.music.jingles_up = false;
@@ -4252,19 +4324,13 @@ impl App {
             // and the build reads the scene only (the memo is a pure function of its key).
             let (mut p, mut c) = (Vec::new(), Vec::new());
             self.scene.skin_palette_into(&g.renderer.skin_layout, self.choice, self.anim_time as f32, self.opts, None, &mut p, &mut c);
+            if let Some(drv) = &self.driving {
+                drv.apply_to_palette(g.renderer.skin_layout.attach_base as usize, &mut p);
+            }
             let second = (p.clone(), c.clone());
             self.pal_spare = vec![(p, c), second];
         }
-        // fix-restart-health: the loaded level's checkpoint is what a later
-        // fail-Restart restores — the game re-saves the buffer with the POST-load
-        // state on EVERY load (`Player_InitWeapon`'s unconditional `Player_RamSave`
-        // [M 0x1a7ef8:325]), cold loads included (the `Player_RamLoad` body is
-        // gated on `IsWarmReset` [M 0x1957a8:9], so `Player_Init`'s health 100 /
-        // armour 0 [M 0x1910f8:128-138] stand and the arm's loadout/armour are
-        // captured). The old model kept the save the level was LOADED with —
-        // `None` after a cold load — and the restart then served the zeroed
-        // buffer: health 50.0, half health.
-        self.entry_save = Some(entry_checkpoint_save(self.scene.sim.as_ref().unwrap()));
+        self.entry_save = self.scene.sim.as_ref().map(entry_checkpoint_save);
     }
 
     /// F8/F9: show the mission-complete / mission-failed results page for the loaded mission —
@@ -6147,6 +6213,46 @@ impl App {
                     if self.fe.is_none() && self.scene.sim.as_ref().is_some_and(|s| s.drones.fail_menu_open()) { self.demo_results(false); }
                     // mp-match-end: the debriefing handover, drained beside the mission end.
                     if let Some((board, settings)) = self.pending_mp_debrief.take() { self.mp_results(board, settings); }
+                } else if let Some(drv) = self.driving.as_mut() {
+                    let throttle = if self.keys.contains(&KeyCode::KeyW) || self.keys.contains(&KeyCode::ArrowUp) { 1.0 } else { 0.0 };
+                    let brake = if self.keys.contains(&KeyCode::KeyS) || self.keys.contains(&KeyCode::ArrowDown) { 1.0 } else { 0.0 };
+                    let steer = if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { -1.0 } else { 0.0 }
+                        + if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 };
+                    let handbrake = self.keys.contains(&KeyCode::Space);
+                    for _ in 0..self.frame_ticks {
+                        drv.step(throttle, brake, steer, handbrake);
+                    }
+                    if !self.noclip {
+                        let (p, yaw, pitch) = drv.chase_camera();
+                        self.cam.pos = Vec3::new(p[0], p[1], p[2]);
+                        self.cam.yaw = yaw;
+                        self.cam.pitch = pitch;
+                    }
+                    if matches!(
+                        drv.mission_state,
+                        nf_game::driving::mission::MissionState::Complete
+                            | nf_game::driving::mission::MissionState::Failed
+                    ) {
+                        let t = self.driving_end_ticks.get_or_insert(0);
+                        *t += self.frame_ticks;
+                        if (*t >= 120 || (*t >= 15 && self.just.contains(&KeyCode::Enter)))
+                            && self.pending_level.is_none()
+                        {
+                            let ret = drv.mission.drive_return(
+                                nf_game::ptp::DrivingStats::default(),
+                                self.selected_difficulty,
+                            );
+                            eprintln!(
+                                "[driving] mission {:?} after {} ticks -> returning to FrontEnd (status_byte={})",
+                                drv.mission_state, drv.ticks, ret.status_byte
+                            );
+                            self.pending_drive_return = Some(ret);
+                            self.pending_level = Some(menu::FRONTEND_LEVEL);
+                            self.driving_end_ticks = None;
+                        }
+                    } else {
+                        self.driving_end_ticks = None;
+                    }
                 }
         // fe-60hz: the front end is the game's 60 Hz menu tick (`MenuManager_Update` 0x21c3d8 runs once
         // per game frame, NTSC 60 Hz [M main 0x109080's vblank pacing]). Ticking it once per RENDERED
@@ -6219,6 +6325,9 @@ impl App {
                     // them whole) instead of a fresh ~1 MB allocation every tick.
                     let (mut np, mut nc) = self.pal_prev.take().or_else(|| self.pal_spare.pop()).unwrap_or_default();
                     self.scene.skin_palette_into(&g.renderer.skin_layout, self.choice, self.anim_time as f32, self.opts, None, &mut np, &mut nc);
+                    if let Some(drv) = &self.driving {
+                        drv.apply_to_palette(g.renderer.skin_layout.attach_base as usize, &mut np);
+                    }
                     let new = (np, nc);
                     frame_part(3, fp_pal.elapsed());
                     g.renderer.char_light_centre = self.scene.char_light_centres();
@@ -6429,6 +6538,9 @@ impl App {
                         f
                     }
                 } else { overlay_for(&self.scene, aspect) };
+                if let Some(drv) = self.driving.as_ref() {
+                    hud.append(&driving::driving_hud(drv, aspect));
+                }
                 if let Some(d) = self.dev.as_deref() { if d.overlay || d.menu { hud.append(&dev::hud(d, &self.scene, aspect, vp)); } }
                 if self.fps_meter.shown > 0.0 { hud.append(&dev::fps_counter_hud(&self.scene, aspect, self.fps_meter.shown)); }
                 // The scene's script overlay belongs to the 3D view — off a movie frame and off the
@@ -6829,6 +6941,9 @@ impl App {
         App {
             sound,
             scene,
+            driving: None,
+            driving_end_ticks: None,
+            pending_drive_return: None,
             cam,
             gfx: None,
             keys: HashSet::new(),
@@ -6945,6 +7060,7 @@ impl App {
 
 }
 
+#[cfg(not(target_os = "android"))]
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.gfx.is_some() { return; }
@@ -7186,6 +7302,7 @@ pub fn apply_av_volumes(fe: &mut menu::FrontEnd, driver: Option<&mut nf_audio::s
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl App {
     /// options-census: the per-frame option drain (docs/systems/options-census.md) — the
     /// auto-aim drain generalized to every wired row. Game-side these are profile globals read
@@ -7265,6 +7382,7 @@ pub fn movie_sfx_volume(fe: &menu::FrontEnd) -> u32 {
     fe.opts.get(&0x1000_0134).copied().unwrap_or(100).max(0) as u32
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn run() -> Result<()> {
     // A closed output pipe (the reader of our stdout/stderr went away) must not crash the game: the
     // log lines are diagnostics (stdio_guard.rs).
@@ -7351,8 +7469,8 @@ pub fn run() -> Result<()> {
             let id = t.strip_prefix("0x").and_then(|h| usize::from_str_radix(h, 16).ok()).or_else(|| t.parse().ok());
             id.filter(|&i| i < 0x72).map(|i| i as u8)
         }).collect()).unwrap_or_default();
-    let scene = if dev { load_dev(&iso, &level, all)? }
-        else if !give_ids.is_empty() { load_weapons(&iso, &level, all, &give_ids)? }
+    let (scene, mut driving_state) = if dev { (load_dev(&iso, &level, all)?, None) }
+        else if !give_ids.is_empty() { (load_weapons(&iso, &level, all, &give_ids)?, None) }
         else if let Some(i) = args.iter().position(|a| a == "--mp-match") {
             // Render aid (mp body checks): `--mp-match H,B[,c0,c1,…]` — the online match load with
             // H humans, B bots and the humans' character words c0.. (the `MP_skins` index), so a
@@ -7367,15 +7485,22 @@ pub fn run() -> Result<()> {
             // in 10 s, straight to the debriefing); NF_NET_TIME=seconds as on the flag host.
             st.time_limit = std::env::var("NF_NET_TIME").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(10 * 60);
             for (slot, &c) in v.iter().skip(2).enumerate() { if slot < nf_game::mp::MP_MAX_SLOTS { st.players[slot].skin = c; } }
-            load_mp_carry(&iso, &level, all, None, st)?
+            (load_mp_carry(&iso, &level, all, None, st)?, None)
         }
-        else if args.iter().any(|a| a == "--mp") { load_mp(&iso, &level, all)? }
+        else if args.iter().any(|a| a == "--mp") { (load_mp(&iso, &level, all)?, None) }
         // Render aid: `--difficulty N` loads at that difficulty (3 = Agent, whose keypads are not
         // unlocked at create, so `--keypad` can arm one on 07000012).
         else if let Some(i) = args.iter().position(|a| a == "--difficulty") {
-            load_with_carry_difficulty(&iso, &level, all, None, args.get(i + 1).context("--difficulty needs N")?.parse()?)?
+            (load_with_carry_difficulty(&iso, &level, all, None, args.get(i + 1).context("--difficulty needs N")?.parse()?)?, None)
         }
-        else { load(&iso, &level, all)? };
+        else if let Some(viv) = u32::from_str_radix(level.trim_end_matches(".bin"), 16)
+            .ok()
+            .and_then(driving::driving_viv_for_level)
+        {
+            let (sc, drv) = driving::load_driving_scene(&iso, viv).map_err(|e| anyhow::anyhow!(e))?;
+            (sc, Some(drv))
+        }
+        else { (load(&iso, &level, all)?, None) };
     let mut cam = start_camera(&scene);
     if let Some(i) = args.iter().position(|a| a == "--cam") {
         let v: Vec<f32> = args[i + 1..i + 6].iter().map(|s| s.parse()).collect::<Result<_, _>>()?;
@@ -7910,7 +8035,16 @@ pub fn run() -> Result<()> {
             if let Some(s) = scene.sim.as_ref() { let q = &s.drones.pickups[k]; eprintln!("NF_SHOT_AT_PICKUP {k}: drawn at {p:?}, weapon {:#x}, hidden {} gone {}", q.weapon, q.hidden, q.gone); }
             return shot(&scene, &cam, args.get(i + 1).context("--shot needs a file name")?, choice, time, opts, notex, nofog, menu_frame.as_ref(), movie_frame.as_ref());
         }
-        return shot(&scene, &cam, args.get(i + 1).context("--shot needs a file name")?, choice, time, opts, notex, nofog, menu_frame.as_ref(), movie_frame.as_ref());
+        if let Some(drv) = driving_state.as_mut() {
+            for _ in 0..time as u32 {
+                drv.step(0.0, 0.0, 0.0, false);
+            }
+            if !args.iter().any(|a| a == "--cam") {
+                let (p, yaw, pitch) = drv.chase_camera();
+                cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: GAME_FOV };
+            }
+        }
+        return shot_with_driving(&scene, &cam, args.get(i + 1).context("--shot needs a file name")?, choice, time, opts, notex, nofog, menu_frame.as_ref(), movie_frame.as_ref(), driving_state.as_ref());
     }
     let event_loop = EventLoop::new()?;
     // Sound: built in `App::bare` (the level's bank in the driver, the default output device; silent without one).
@@ -7926,6 +8060,11 @@ pub fn run() -> Result<()> {
     // headless-app-harness: the constructor moved into `App::bare` (the headless harness
     // builds the same skeleton, gfx: None / sound silent); the CLI-only knobs apply on top.
     let mut app = App::bare(iso, scene, cam, opts, choice, time);
+    if let Some(drv) = driving_state {
+        let (p, yaw, pitch) = drv.chase_camera();
+        app.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: GAME_FOV };
+        app.driving = Some(drv);
+    }
     app.fps_cap = fps_cap;
     app.notex = notex;
     app.nofog = nofog;
@@ -8881,7 +9020,9 @@ mod headless_app_harness {
         let iso2 = iso.clone();
         let job = async_load::Job::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(6));
-            crate::load(&iso2, "07000005.bin", false).map_err(|e| e.to_string())
+            crate::load(&iso2, "07000005.bin", false)
+                .map(|sc| (sc, None))
+                .map_err(|e| e.to_string())
         });
         h.app.async_load = Some(LevelLoad { job, next: 0x0700_0005, ptp_return: None, ready: None });
 

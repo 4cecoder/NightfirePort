@@ -160,7 +160,24 @@ pub fn pick_iso(owner: Option<*mut std::ffi::c_void>, start: Option<&Path>) -> O
         let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = owner;
+        let loc = start
+            .map(|s| {
+                let escaped = s.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+                format!(" default location (POSIX file \"{escaped}\")")
+            })
+            .unwrap_or_default();
+        let script = format!(
+            "POSIX path of (choose file of type {{\"iso\", \"bin\", \"public.iso-image\"}} with prompt \"Select your 007: Nightfire disc image\"{loc})"
+        );
+        let out = Command::new("osascript").args(["-e", &script]).output().ok()?;
+        if !out.status.success() { return None; }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!p.is_empty()).then(|| PathBuf::from(p))
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let _ = owner;
         let mut cmd = Command::new("zenity");
@@ -181,7 +198,7 @@ pub fn game_window_up(pid: u32) -> Option<bool> {
     { let _ = pid; None }
 }
 
-/// Shows a fatal launcher error where a GUI user can see it (a message box on Windows; stderr elsewhere).
+/// Shows a fatal launcher error where a GUI user can see it (MessageBox on Windows, alert on macOS, stderr elsewhere).
 pub fn fatal(msg: &str) {
     #[cfg(windows)]
     {
@@ -189,7 +206,13 @@ pub fn fatal(msg: &str) {
         // MB_OK | MB_ICONERROR
         unsafe { win::MessageBoxW(std::ptr::null_mut(), text.as_ptr(), cap.as_ptr(), 0x10) };
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("display alert \"NightfirePort\" message \"{escaped}\" as critical");
+        let _ = Command::new("osascript").args(["-e", &script]).status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let _ = msg;
 }
 
