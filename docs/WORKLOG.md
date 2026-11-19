@@ -35,3 +35,23 @@ retune-nb-16-4 (2026-11-19): started. Round 4 of the 00 Agent real-damage walk
 (walk_the_chasers_defeat_completes_the_mission_on_real_damage_00agent). Branch from origin/master
 2be83dc10; no origin/s/retune-nb-16-2 or -3 branch or report exists anywhere, so master's walk file
 and its ignore message are the current ledger truth. Reading the ledger, then the next untried lever.
+
+### retune-nb-16-4 progress
+
+retune-nb-16-4 progress (2026-11-19): the lever-(a) wire trace ran and KILLED the wire theory —
+the loot window measures ZERO live-claimed spots on this tree (the only stage flip is the
+LiftCrush hurt #1, gate 0xcb, at +3185, its poly the bay lift 12+ u east; the ShuttleLaunch
+ch-0xf3 pulses arm only the launch script's own window). The real blocker was the round-2
+truncate(2): two kind-0x1 ammo boxes (the Ammo9 w 0x15 the ledger called a med-kit — Pickup
+Handler's kind-1 arm is Player_EquipAmmo [M 0x18e650:210-214], 0x15 unowned, it refuses forever;
+the "+10.0 health buffer" never existed) truncated the armour (kind 0x3) out of every run, and
+Bond died at 12882 to the chaser's three landed rounds with armour 0.0. The fix (d3-!tops_up
+gated, file-local): the loot pass moved ahead of the room-soldier fight, sort kit -> armour ->
+ammo, truncate(3). Measured: the loot window 156 ticks (armour +90, the Commando +50 spare 64),
+the soldier fight costs 0 health, the kill loop takes her at +3508 with health 19.5 untouched,
+pulse 2 sat out in the shelter, the squad stands entered at 19.5. NEW death t17282: ONE -19.50
+round from squad clone #12 at d 1.4 with armour 0.0 (the 50.0 pool spent across the soldier
+fight, the 3508-tick punch-band kill and the squad's early fire; the pit room has NO health
+pickup [D the audit's 17-pickup table]). The whole walkreal_07000016_live binary: 18 passed /
+0 failed / 1 ignored (the d3 walk, ledgered at t17282 with the next levers in the ignore
+message: the east armour #649 fetch, the shorter kill, the in-room re-arm hold).

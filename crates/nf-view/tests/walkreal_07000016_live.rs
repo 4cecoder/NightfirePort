@@ -2712,41 +2712,6 @@ fn walk_the_chasers_defeat_completes_the_mission_on_real_damage_at(difficulty: u
             // Measured: the chaser goes down (+2806) and the walk dies in the pit-squad stage,
             // t12518 -> t17276.
             if difficulty >= 3 {
-                let r = 6.0f32;
-                for _ in 0..3 {
-                    let near = {
-                        let sim = w.scene.sim.as_ref().unwrap();
-                        let bp = sim.bond.pos;
-                        (0..sim.drones.list.len()).filter(|&i| { let d = &sim.drones.list[i];
-                            i != chaser && d.present && d.enabled && !d.corpse && d.health > 0.0 && d.team == 1
-                                && walker::dxz(d.pos, bp) < r && (d.pos[1] - bp[1]).abs() < 2.0 })
-                            .min_by(|&a, &b| walker::dxz(sim.drones.list[a].pos, bp).total_cmp(&walker::dxz(sim.drones.list[b].pos, bp)))
-                    };
-                    let Some(di) = near else { break };
-                    let (sh, bh) = { let sim = w.scene.sim.as_ref().unwrap(); (sim.drones.list[di].health, sim.drones.health.health) };
-                    let _ = w.shoot_bounded(di, "the blast room's soldier before the chaser", 600);
-                    {
-                        let sim = w.scene.sim.as_ref().unwrap();
-                        eprintln!("[real-damage] the room-soldier stand #{di}: hp {:.1} -> {:.1}, Bond {:.1} -> {:.1}, clip {} spare {}",
-                            sh, sim.drones.list[di].health, bh, sim.drones.health.health, sim.gun.clip, sim.gun.spare);
-                    }
-                }
-                eprintln!("[016] room soldiers done, health {:.1}", w.scene.sim.as_ref().unwrap().drones.health.health);
-                if let Some(watch) = stage_watch.as_mut() {
-                    let sim = w.scene.sim.as_ref().unwrap();
-                    watch.check(sim, w.total_ticks - t0, "after the room soldiers");
-                }
-                // The room-soldier fight leaves Bond against the south wall (-14.6, -173.1): the
-                // chaser (her 0x14 gun) then landed 4 x 5.0 at 2.4 u while the range keeping could
-                // not back off. Back to the room's open floor first (the shelter route's own stand):
-                // the chaser fight then costs nothing (37.0 into the squad stage, was 17.0).
-                w.lenient = true;
-                w.walk_to(walker::Wp::new(-14.45, -22.0, -170.16).r(0.5), "the blast room's open floor");
-                w.lenient = false;
-                if let Some(watch) = stage_watch.as_mut() {
-                    let sim = w.scene.sim.as_ref().unwrap();
-                    watch.check(sim, w.total_ticks - t0, "on the open floor");
-                }
                 // retune-nb-16-2, the ammo chain WHERE IT IS SAFE (the measured round: the exit-end
                 // hop died at t10349 under the lane's live lines — the comment there; but the ROOM
                 // is where the fights happen and the drops land): the two room soldiers (#6 skin
@@ -2804,22 +2769,27 @@ fn walk_the_chasers_defeat_completes_the_mission_on_real_damage_at(difficulty: u
                         // armour hop's rounds spend), the armour (kind 0x3 — absorbs before
                         // health [M Player_HandlePain 0x1902c8:84-104's type-0 arm; the d2
                         // sister's whole pit phase ran on it]) second, distance within class.
+                        // retune-nb-16-4 MEASURED (the wire-watch run on this tree): the loot
+                        // scan printed ZERO live-claimed spots — the round-2 ledger's
+                        // "LIVE-WIRE-CLAIMED during the loot window" is stale here; the ONLY
+                        // thing that dropped the armour was the round-2 truncate keeping TWO
+                        // kind-0x1 spots (the med-kit 1.4 u out AND the 50-round 0x1a box at
+                        // (-16.8,-167.9)) ahead of it, so every run looted kits only and Bond
+                        // died at 12882 to her three landed rounds with armour 0.0. The run
+                        // also moved this whole pass ahead of the room-soldier fight: the kit's
+                        // +10 lands before ANY exposure, the armour covers the soldier fight
+                        // AND her fight AND the squad stage, and the 0x1a box arms the kill
+                        // loop (the round-2 lever (b)'s ammo goal, measured available here).
                         v.sort_by(|a, b| {
-                            let ka = a.2.starts_with("pickup kind 0x0001");
-                            let kb = b.2.starts_with("pickup kind 0x0001");
-                            kb.cmp(&ka).then(a.0.total_cmp(&b.0))
+                            let rank = |t: &str| -> u8 {
+                                if t.starts_with("pickup kind 0x0001 w 0x15") { 0 }
+                                else if t.starts_with("pickup kind 0x0003") { 1 }
+                                else { 2 }
+                            };
+                            rank(&a.2).cmp(&rank(&b.2)).then(a.0.total_cmp(&b.0))
                         });
                         v.dedup_by(|a, b| walker::dxz(a.1, b.1) < 1.0);
-                        // retune-nb-16-2 MEASURED (the run9 ledger): ONE hop only. The med-kit
-                        // (+10.0 [L run8/9: health 19.5 at frame 12709]) is 1.4 u out and its
-                        // 42-tick hop lands the take; the farther hops (the armour #648, the 7-
-                        // round AR, the corpse) are pure point-blank exposure — the armour is
-                        // taken by the post-kill pit loot pass 2.4 u from the shelter stand
-                        // anyway, and her landed rounds (-10.0/-5.0/-4.5 inside the always-hit
-                        // band [M 0x179740:113-115]) out-cost 7 AR rounds. Her landed cadence
-                        // measured ~1 round per 100-180 ticks: the whole loot window must stay
-                        // under one landed round.
-                        v.truncate(2);
+                        v.truncate(3);
                         v
                     };
                     {
@@ -2877,6 +2847,41 @@ fn walk_the_chasers_defeat_completes_the_mission_on_real_damage_at(difficulty: u
                     let sim = w.scene.sim.as_ref().unwrap();
                     eprintln!("[real-damage] the room loot hop done: in hand {:#04x} clip {} spare {}, health {:.1}",
                         sim.gun.weapon, sim.gun.clip, sim.gun.spare, sim.drones.health.health);
+                }
+                let r = 6.0f32;
+                for _ in 0..3 {
+                    let near = {
+                        let sim = w.scene.sim.as_ref().unwrap();
+                        let bp = sim.bond.pos;
+                        (0..sim.drones.list.len()).filter(|&i| { let d = &sim.drones.list[i];
+                            i != chaser && d.present && d.enabled && !d.corpse && d.health > 0.0 && d.team == 1
+                                && walker::dxz(d.pos, bp) < r && (d.pos[1] - bp[1]).abs() < 2.0 })
+                            .min_by(|&a, &b| walker::dxz(sim.drones.list[a].pos, bp).total_cmp(&walker::dxz(sim.drones.list[b].pos, bp)))
+                    };
+                    let Some(di) = near else { break };
+                    let (sh, bh) = { let sim = w.scene.sim.as_ref().unwrap(); (sim.drones.list[di].health, sim.drones.health.health) };
+                    let _ = w.shoot_bounded(di, "the blast room's soldier before the chaser", 600);
+                    {
+                        let sim = w.scene.sim.as_ref().unwrap();
+                        eprintln!("[real-damage] the room-soldier stand #{di}: hp {:.1} -> {:.1}, Bond {:.1} -> {:.1}, clip {} spare {}",
+                            sh, sim.drones.list[di].health, bh, sim.drones.health.health, sim.gun.clip, sim.gun.spare);
+                    }
+                }
+                eprintln!("[016] room soldiers done, health {:.1}", w.scene.sim.as_ref().unwrap().drones.health.health);
+                if let Some(watch) = stage_watch.as_mut() {
+                    let sim = w.scene.sim.as_ref().unwrap();
+                    watch.check(sim, w.total_ticks - t0, "after the room soldiers");
+                }
+                // The room-soldier fight leaves Bond against the south wall (-14.6, -173.1): the
+                // chaser (her 0x14 gun) then landed 4 x 5.0 at 2.4 u while the range keeping could
+                // not back off. Back to the room's open floor first (the shelter route's own stand):
+                // the chaser fight then costs nothing (37.0 into the squad stage, was 17.0).
+                w.lenient = true;
+                w.walk_to(walker::Wp::new(-14.45, -22.0, -170.16).r(0.5), "the blast room's open floor");
+                w.lenient = false;
+                if let Some(watch) = stage_watch.as_mut() {
+                    let sim = w.scene.sim.as_ref().unwrap();
+                    watch.check(sim, w.total_ticks - t0, "on the open floor");
                 }
                 // retune-nb-16-2: THE KILL FIRST. She hovers at d 0.9-2.5 through the whole
                 // stage (the flush [M 0x148010:100-131] has her hunting from the ch-242 spawn
@@ -3090,7 +3095,7 @@ fn walk_the_chasers_defeat_completes_the_mission_on_real_damage_agent() {
 /// DroneWeap_DoBulletAccuracy 0x179740:74-88]. The d2 gates (the pit-door guard pre-shoot) fire
 /// at 3 too. Real input only; no health/ammo/channel writes.
 #[test]
-#[ignore = "retune-nb-16-2 re-tune 2026-11-19, still red, now measured to EXACT ZERO MARGIN: her landed rounds across the chaser stage sum 19.5 (-10.00 frame 12709, -5.00 12863, -4.50 12882 = death at 0.0 [L NF_DMG_TRACE runs 2/3/5/8-13]) and the stage's own med-kit (+10.0, pickup kind 0x1 at (-15.5,-170.8), take radius ~1.2 u — it lands mid-walk in every structure) lifts the 9.5 stage entry to exactly that 19.5. The stage structure (this branch): room soldiers (19.5->9.5, clip 3 spare 0 / 1 spare 0 in hand) -> the room loot hop (the kit; gated !tops_up) -> THE KILL FIRST (the kill loop before the door-guard fight) -> the backpedal floor hold (the fight's feet never enter the wire poly; the probe is the game's own hurt capsule feet->+1.8 r 0.55 [M hurt.rs; sit_out_pulse pins the shape] — the loot-pass 1.5/0.4 probe measured a MISS at the wire's edge) -> the live-only wire escape (Hurt_Update's disabled bit [M 0x17e870 tail, 0x17e5d0:26-37]). Measured-worse, do not retry: the exit-end wide corpse-hop (16 u, the nav arcs 20 nodes west across the open corridor under the live ring brute #5, 35.0 in 5 hits, the pocket fists 28.0+14.0, the gallery AR #20 19.5 in 14 — death t10349); the loot hops with return fire ON (each stand trades inside the always-hit band with a dry gun — 180 ticks for 0.3 u); arrive 0.6 on the kit hop (the take never fires, 9.5 -> 4.5 for nothing). THE ARMOUR IS THE MISSING ABSORB: the BodyArmourHeavy #648 (kind 0x3, (-14.4,-172.7), 2.3 u [D]) absorbs before health [M Player_HandlePain 0x1902c8:84-104's type-0 arm; the d2 sister's whole pit phase ran on it] but its spot measures LIVE-WIRE-CLAIMED during the loot window (the gate rises mid-stage; post-kill the d1/d2 loot pass takes the same spot untouched). NEXT LEVER: (a) NF-trace the wire volume's disabled bit across the stage to find the gate's rise tick (a script trigger on the chaser stage channels); if it rises late, hop the armour before it; (b) the AR drop (kind 0x0 w 0x14 rounds 7 at (-11.3,-170.1), lootable in the run8/9 lists) + the kit, return fire OFF, then the kill loop armed — her 100 hp needs ~2 head taps x5 [M NDrone2_HitDamage's part-5] and the loop's dry cycling measured the full -314 kill (run3) — the fight must end under ~200 ticks so her landed ledger stays under the kit-boosted 19.5; (c) if the gate rises early, the player answer is the shelter floor itself: hold the fight INSIDE the room's north half (the stage-entry spot (-14.14,-170.46) measured wire-free all stage) and let the backpedal hold pin him there."]
+#[ignore = "retune-nb-16-4 re-tune 2026-11-19, still red, the frontier moved from the chaser stage to the pit-squad stage. The lever-(a) wire trace (the WireWatch 1-tick disabled-bit diff, this tree) measured the loot window CLEAN — ZERO live-claimed spots; the only stage flip is the LiftCrush hurt #1 (gate 0xcb) ROSE live at +3185, its poly (0.5..4.4, -162..-158) the bay lift 12+ u east of the room, and the ShuttleLaunch ch-0xf3 pulses 1611..2170/6810..7320 [D blast_room_shelter_16_live] arm only the LAUNCH script's own window — the round-2 'LIVE-WIRE-CLAIMED during the loot window' line is stale on this tree. The real blocker was the round-2 truncate(2): the scan's kind-0x1 class holds TWO boxes (the Ammo9 w 0x15 at (-15.5,-170.8) — the ledger's 'med-kit', actually MP5/Storm ammo that REFUSES forever: Pickup_Handler's kind-1 arm is Player_EquipAmmo [M 0x18e650:210-214] and 0x15 is unowned, so the '+10.0 health buffer' never existed; and the Ammo556 w 0x1a at (-16.8,-167.9)) ahead of the armour (kind 0x3), so every round-2 run looted ammo only and died at 12882 to her three landed rounds with armour 0.0. THIS ROUND (all difficulty >= 3 && !tops_up, file-local): the loot pass moved ahead of the room-soldier fight, the sort kit -> armour -> ammo, truncate(3) — a future round should SKIP the w-0x15 tag outright (it can never take) and save its 66-tick hop. Measured on this tree: the loot window is 156 ticks (the armour hop +90 — the pool set flat 50.0 [M 0x18e650:220-224], the Commando box +50 spare 64), the room-soldier fight costs 0 health (the armour absorbs it), the kill loop takes her down at +3508 with health 19.5 UNTOUCHED (her punches at the d 1.9 punch band land on the armour), Bond sits pulse 2 out in the shelter and enters the squad stands at health 19.5. NEW DEATH t17282: ONE round -19.50 from squad clone #12 (skin 0x500001e, weapon 0x14, hp 100) at d 1.4 at (-12.62,-21.97,-169.69) with armour 0.0 — the 50.0 pool spent across the soldier fight, the 3508-tick punch-band kill and the squad's early fire; health 19.5 is the stage entry and NO health pickup exists in the pit room [D the audit's 17-pickup table: the pit pickups are the armour x2 (#648/#649), Ammo556 x2, Ammo9 x2, 007 x2 — every kind-1 is ammo [M 0x18e650's kind-1 arm]]. NEXT LEVERS: (a) the east armour #649 (21.62,-22.97,-168.83) [D] — 36 u east of the room; a squad-stage fetch re-sets the pool to 50.0 before the clones close (kind 3 refuses only at pool >= 50 [M 0x18e650:220-221]) — hold the fight inside the west room while the fetch runs; (b) shorten the kill: the loop held the punch band 3508 of the 5600 allowed ticks — every 100 ticks saved is squad-stage armour; (c) the squad-stage law: #12 closed to d 1.4 and fired once between the bounded slices while the re-arm legs walked Bond east of the room's door — hold the re-arm inside the room and let the close stands (120-tick, inside 10 u) answer the clone."]
 fn walk_the_chasers_defeat_completes_the_mission_on_real_damage_00agent() {
     walker::with_real_damage_head_hunting(|| walk_the_chasers_defeat_completes_the_mission_on_real_damage_at(3));
 }
