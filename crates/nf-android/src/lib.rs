@@ -859,7 +859,8 @@ mod android_impl {
                         std::mem::take(&mut app.input.look_accum),
                     );
                     if dx != 0.0 || dy != 0.0 {
-                        drv.pov_aim(dx as f64 * 12.0, dy as f64 * 12.0);
+                        // Undo `nativeSetInput`'s 0.004 rad/px scaling so `pov_aim` receives raw touch pixels.
+                        drv.pov_aim((-dx * 250.0) as f64, (-dy * 250.0 * std::f32::consts::FRAC_PI_2) as f64);
                     }
                     if b & BTN_FIRE != 0 {
                         drv.pov_fire();
@@ -879,7 +880,7 @@ mod android_impl {
                 ) {
                     let t = app.driving_end_ticks.get_or_insert(0);
                     *t += 1;
-                    if (*t >= 120 || (*t >= 15 && (just & BTN_USE != 0))) && pending_level.is_none() {
+                    if (*t >= 180 || (*t >= 20 && (just & BTN_USE != 0))) && pending_level.is_none() {
                         let state_str = match drv.mission_state {
                             nf_game::driving::mission::MissionState::Complete => "Complete",
                             nf_game::driving::mission::MissionState::Failed => "Failed",
@@ -891,7 +892,15 @@ mod android_impl {
                             json_escape(state_str),
                             drv.ticks
                         ));
-                        pending_level = Some("07000048.bin".to_string());
+                        // On failure, retry the current driving mission instead of kicking back to the Start screen;
+                        // on completion, advance Paris Prelude -> The Exchange or return to FrontEnd.
+                        pending_level = Some(if matches!(drv.mission_state, nf_game::driving::mission::MissionState::Failed) {
+                            app.archive.clone()
+                        } else if app.archive.eq_ignore_ascii_case("09000001.bin") || app.archive.eq_ignore_ascii_case("MIS01") {
+                            "07000005.bin".to_string()
+                        } else {
+                            "07000048.bin".to_string()
+                        });
                         app.driving_end_ticks = None;
                         break;
                     }
