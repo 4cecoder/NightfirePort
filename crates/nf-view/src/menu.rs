@@ -9493,11 +9493,6 @@ pub fn menu_overlay_fonts(fe: &FrontEnd, font: &nf_formats::hud::Font, hfont: &n
             // 0x03000074; the prompt control 0x100000fa (131,309,379×16) LBL 0x1c9, colours 0x7f621fff;
             // the legal plate 0x10000197 (50,332,540×108). The handler binds 0x10001eb to the prompt
             // [M 0x20a408] and 0x375 to the plate, flashing on the 240-frame cycle.]
-            // On widescreen/20:9/ultrawide displays, extend the title art's edge colour seamlessly
-            // across the full display width behind the crisp unstretched 4:3 007 logo plate.
-            if h.aspect > 4.0 / 3.0 + 0.01 {
-                h.quad(Anchor::Stretch, -1, 0x0300_0074, 0, 0.0, 0.0, 512.0, 448.0, [0.0, 0.0, 12.0, 512.0], (false, false), gs(0x707070, 0xff));
-            }
             quad640(&mut h, 0x0300_0074, 0.0, 0.0, MW, MH, [0.0, 0.0, 512.0, 512.0], gs(0x7f7f7f, 0xff));
             if fe.press_start_on {
                 centred(&mut h, font, -2, &bind(0x100_01eb), mx(320.5), my(326.0), gs(YELLOW, 0xff), true, 1.25); // PCSX2 m00: 266 units wide, middle y 320
