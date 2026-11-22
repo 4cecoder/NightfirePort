@@ -979,7 +979,7 @@ impl Renderer {
             address_mode_u: wgpu::AddressMode::Repeat, address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            anisotropy_clamp: 16,
+            anisotropy_clamp: crate::preflight::current_budget().anisotropy_clamp,
             ..Default::default()
         });
         let hud_sampler = dc(device, "gpu: create_sampler").create_sampler(&wgpu::SamplerDescriptor {

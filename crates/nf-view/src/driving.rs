@@ -834,6 +834,9 @@ impl DrivingState {
     /// FUN_001f3188]. The wheel inputs come from the land step: the slip ratio, the contact
     /// triangle's surface byte; [S] which vtable value each input is (driving-effects.md).
     fn step_fx(&mut self) {
+        if self.in_heli {
+            return;
+        }
         let Some(fx) = self.fx.as_mut() else { return };
         use nf_game::driving::effects::{CarFxInput, WheelFxInput};
         let car = &self.car;
@@ -1047,6 +1050,9 @@ impl DrivingState {
 
     /// The player car's specular triangles this frame (world space) for the additive overlay.
     fn shine_group(&self, right: [f32; 3], up: [f32; 3]) -> Option<(Option<usize>, bool, Vec<Vertex>)> {
+        if self.in_heli {
+            return None;
+        }
         let sh = self.shine.as_ref()?;
         let tex = sh.tex?;
         // The view's forward axis (camera + 0x20, into the scene): up x right for this basis.

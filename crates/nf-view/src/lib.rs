@@ -24,6 +24,7 @@ pub mod dev;
 #[cfg(not(target_os = "android"))]
 pub mod devwin;
 pub mod driving;
+pub mod preflight;
 pub mod drive_reflection;
 pub mod hud;
 pub mod credits;
@@ -2140,7 +2141,8 @@ pub fn merge_weapon_models<R: std::io::Read + std::io::Seek>(iso: &IsoImage<R>,
                 if !c.1.contains_key(&name) {
                     c.0.push_back(name.clone());
                     c.1.insert(name.clone(), l.clone());
-                    while c.1.len() > 1 { if let Some(old) = c.0.pop_front() { c.1.remove(&old); } }
+                    let cap = preflight::current_budget().foreign_level_cache_cap;
+                    while c.1.len() > cap { if let Some(old) = c.0.pop_front() { c.1.remove(&old); } }
                 }
                 l
             }
