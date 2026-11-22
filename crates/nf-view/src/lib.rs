@@ -24,6 +24,7 @@ pub mod dev;
 #[cfg(not(target_os = "android"))]
 pub mod devwin;
 pub mod driving;
+pub mod live_bridge;
 pub mod preflight;
 pub mod drive_reflection;
 pub mod hud;
@@ -3232,6 +3233,7 @@ struct App {
     prev_keys_q: bool,
     driving_end_ticks: Option<u32>,
     pending_drive_return: Option<nf_game::ptp::DriveReturn>,
+    live_bridge: Option<live_bridge::LiveBridge>,
     cam: Camera,
     gfx: Option<Gfx>,
     keys: HashSet<KeyCode>,
@@ -5856,9 +5858,26 @@ impl App {
                                 (input, self.trigger, self.just.remove(&KeyCode::KeyR), self.just.remove(&KeyCode::KeyE))
                             };
                             // The online pause (net_menu): the keys belong to the menu — this player idles.
-                            let (mut input, trigger, reload, use_key) = if net_menu {
+                            let (mut input, mut trigger, reload, use_key) = if net_menu {
                                 (Default::default(), false, false, false)
-                            } else { (input, trigger, reload, use_key) };
+                            } else if let Some(ctrl) = self.live_bridge.as_mut().filter(|b| b.control.active).map(|b| &mut b.control) {
+                                let inp = nf_game::player::Input {
+                                    forward: ctrl.move_fwd,
+                                    strafe: ctrl.move_right,
+                                    turn: std::mem::take(&mut ctrl.turn_rad),
+                                    look: std::mem::take(&mut ctrl.look_rad),
+                                    fire: ctrl.fire,
+                                    zoom: ctrl.zoom,
+                                    scope: ctrl.zoom,
+                                    crouch: ctrl.crouch,
+                                    crouch_held: ctrl.crouch,
+                                    ..Default::default()
+                                };
+                                (inp, ctrl.fire, std::mem::take(&mut ctrl.reload), std::mem::take(&mut ctrl.use_key))
+                            } else {
+                                (input, trigger, reload, use_key)
+                            };
+                            let _ = &mut trigger;
                             // Test aid (NF_NET_AUTOFIRE="a-b"): hold the trigger on match ticks a..=b — the
                             // two-window desync hunt fires without a hand on the window.
                             let trigger = trigger || (self.net.is_some() && std::env::var("NF_NET_AUTOFIRE").ok()
@@ -6547,19 +6566,30 @@ impl App {
                     // mp-match-end: the debriefing handover, drained beside the mission end.
                     if let Some((board, settings)) = self.pending_mp_debrief.take() { self.mp_results(board, settings); }
                 } else if let Some(drv) = self.driving.as_mut() {
-                    let throttle = if self.keys.contains(&KeyCode::KeyW) || self.keys.contains(&KeyCode::ArrowUp) { 1.0 } else { 0.0 };
-                    let brake = if self.keys.contains(&KeyCode::KeyS) || self.keys.contains(&KeyCode::ArrowDown) { 1.0 } else { 0.0 };
-                    let steer = if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { 1.0 } else { 0.0 }
-                        - if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 };
-                    let handbrake = self.keys.contains(&KeyCode::Space);
+                    let (throttle, brake, steer, handbrake, ag_fire, ag_zoom) =
+                        if let Some(ctrl) = self.live_bridge.as_ref().filter(|b| b.control.active).map(|b| &b.control) {
+                            (ctrl.throttle, ctrl.brake, ctrl.steer, ctrl.handbrake, ctrl.fire, ctrl.zoom)
+                        } else {
+                            let t = if self.keys.contains(&KeyCode::KeyW) || self.keys.contains(&KeyCode::ArrowUp) { 1.0 } else { 0.0 };
+                            let b = if self.keys.contains(&KeyCode::KeyS) || self.keys.contains(&KeyCode::ArrowDown) { 1.0 } else { 0.0 };
+                            let s = if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { 1.0 } else { 0.0 }
+                                - if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 };
+                            (t, b, s, self.keys.contains(&KeyCode::Space), false, false)
+                        };
                     // Weapons: Ctrl (or Left-click in POV sniper mode) fires; Right-click zooms sniper scope; Q cycles weapon.
                     if drv.pov_active() {
-                        if self.trigger || self.keys.contains(&KeyCode::ControlLeft) {
+                        if let Some(ctrl) = self.live_bridge.as_mut().filter(|b| b.control.active).map(|b| &mut b.control) {
+                            let (tr, lr) = (std::mem::take(&mut ctrl.turn_rad), std::mem::take(&mut ctrl.look_rad));
+                            if tr != 0.0 || lr != 0.0 {
+                                drv.pov_aim((tr * 200.0) as f64, (lr * 200.0) as f64);
+                            }
+                        }
+                        if self.trigger || self.keys.contains(&KeyCode::ControlLeft) || ag_fire {
                             drv.pov_fire();
                         }
-                        drv.pov_scope(self.zoom || self.keys.contains(&KeyCode::ShiftLeft));
+                        drv.pov_scope(self.zoom || self.keys.contains(&KeyCode::ShiftLeft) || ag_zoom);
                     } else if let Some(w) = drv.weapons.as_mut() {
-                        w.fire |= self.keys.contains(&KeyCode::ControlLeft) || self.trigger;
+                        w.fire |= self.keys.contains(&KeyCode::ControlLeft) || self.trigger || ag_fire;
                         w.cycle |= self.keys.contains(&KeyCode::KeyQ) && !self.prev_keys_q;
                     }
                     self.prev_keys_q = self.keys.contains(&KeyCode::KeyQ);
@@ -6601,6 +6631,7 @@ impl App {
                         self.driving_end_ticks = None;
                     }
                 }
+        self.poll_live_bridge();
         // fe-60hz: the front end is the game's 60 Hz menu tick (`MenuManager_Update` 0x21c3d8 runs once
         // per game frame, NTSC 60 Hz [M main 0x109080's vblank pacing]). Ticking it once per RENDERED
         // frame ran every menu timer — the 2700-tick attract countdown, the P_INTRO/P_ESTHERO movie
@@ -7288,6 +7319,170 @@ impl App {
     /// top, so a headless frame runs the exact per-frame path the window runs. The driver is built HERE: run() used to
     /// build it beside this call and drop it, so the front end had no driver and every menu sound was silent in every
     /// build from 2026-10-17 to v0.1.6.
+    /// Drain and execute any pending zero-restart Live Agent Bridge commands on the live game state.
+    fn poll_live_bridge(&mut self) {
+        let reqs = match self.live_bridge.as_ref() {
+            Some(b) => b.drain(),
+            None => return,
+        };
+        for req in reqs {
+            let reply = match &req.cmd {
+                live_bridge::LiveCmd::Ping => "{\"ok\":true,\"pong\":true}".into(),
+                live_bridge::LiveCmd::State => {
+                    let pos = if let Some(drv) = self.driving.as_ref() {
+                        drv.car.pos
+                    } else if let Some(sim) = self.scene.sim.as_ref() {
+                        sim.bond.pos
+                    } else {
+                        [self.cam.pos.x, self.cam.pos.y, self.cam.pos.z]
+                    };
+                    let hp = self.scene.sim.as_ref().map_or(100.0, |s| s.drones.health.health);
+                    let weapon = self.scene.sim.as_ref().map_or(0, |s| s.gun.weapon);
+                    let takeover = self.live_bridge.as_ref().is_some_and(|b| b.control.active);
+                    format!(
+                        "{{\"ok\":true,\"level\":\"{:08x}\",\"pos\":[{:.3},{:.3},{:.3}],\"yaw\":{:.4},\"pitch\":{:.4},\"health\":{:.1},\"weapon\":{},\"driving\":{},\"takeover\":{}}}",
+                        self.level_code, pos[0], pos[1], pos[2], self.cam.yaw, self.cam.pitch, hp, weapon, self.driving.is_some(), takeover
+                    )
+                }
+                live_bridge::LiveCmd::Drones => {
+                    let mut items = Vec::new();
+                    if let Some(sim) = self.scene.sim.as_ref() {
+                        for (i, d) in sim.drones.list.iter().enumerate() {
+                            items.push(format!(
+                                "{{\"i\":{},\"pos\":[{:.2},{:.2},{:.2}],\"hp\":{:.1},\"alive\":{}}}",
+                                i, d.pos[0], d.pos[1], d.pos[2], d.health, d.health > 0.0
+                            ));
+                        }
+                    }
+                    format!("{{\"ok\":true,\"count\":{},\"drones\":[{}]}}", items.len(), items.join(","))
+                }
+                live_bridge::LiveCmd::Doors => {
+                    let mut items = Vec::new();
+                    if let Some(sim) = self.scene.sim.as_ref() {
+                        for (i, d) in sim.drones.doors.list.iter().enumerate() {
+                            items.push(format!(
+                                "{{\"i\":{},\"pos\":[{:.2},{:.2},{:.2}],\"state\":{}}}",
+                                i, d.pos[0], d.pos[1], d.pos[2], d.state
+                            ));
+                        }
+                    }
+                    format!("{{\"ok\":true,\"count\":{},\"doors\":[{}]}}", items.len(), items.join(","))
+                }
+                live_bridge::LiveCmd::Driving => {
+                    if let Some(drv) = self.driving.as_ref() {
+                        format!(
+                            "{{\"ok\":true,\"viv\":\"{}\",\"ticks\":{},\"pos\":[{:.2},{:.2},{:.2}],\"pov\":{},\"in_heli\":{},\"state\":\"{:?}\"}}",
+                            drv.viv, drv.ticks, drv.car.pos[0], drv.car.pos[1], drv.car.pos[2], drv.pov_active(), drv.in_heli, drv.mission_state
+                        )
+                    } else {
+                        "{\"ok\":false,\"err\":\"not in driving mode\"}".into()
+                    }
+                }
+                live_bridge::LiveCmd::Takeover(on) => {
+                    if let Some(b) = self.live_bridge.as_mut() {
+                        b.control.active = *on;
+                        if !*on {
+                            b.control = live_bridge::AgentControl::default();
+                        }
+                    }
+                    format!("{{\"ok\":true,\"takeover\":{on}}}")
+                }
+                live_bridge::LiveCmd::Input { fwd, right, turn, look, fire, zoom, crouch, throttle, brake, steer, handbrake } => {
+                    if let Some(b) = self.live_bridge.as_mut() {
+                        b.control.active = true;
+                        b.control.move_fwd = *fwd;
+                        b.control.move_right = *right;
+                        b.control.turn_rad += *turn;
+                        b.control.look_rad += *look;
+                        b.control.fire = *fire;
+                        b.control.zoom = *zoom;
+                        b.control.crouch = *crouch;
+                        b.control.throttle = *throttle;
+                        b.control.brake = *brake;
+                        b.control.steer = *steer;
+                        b.control.handbrake = *handbrake;
+                    }
+                    "{\"ok\":true}".into()
+                }
+                live_bridge::LiveCmd::Teleport { x, y, z, yaw, pitch } => {
+                    if let Some(drv) = self.driving.as_mut() {
+                        drv.car.pos = [*x, *y, *z];
+                        drv.car.vel = [0.0; 3];
+                        if let Some(yw) = yaw { drv.car.yaw = *yw; }
+                    } else if let Some(sim) = self.scene.sim.as_mut() {
+                        sim.bond.pos = [*x, *y, *z];
+                        sim.bond.vel = [0.0; 3];
+                        if let Some(yw) = yaw { sim.bond.yaw = *yw; }
+                        if let Some(pt) = pitch { sim.bond.pitch = *pt; }
+                    }
+                    self.cam.pos = Vec3::new(*x, *y, *z);
+                    if let Some(yw) = yaw { self.cam.yaw = *yw; }
+                    if let Some(pt) = pitch { self.cam.pitch = *pt; }
+                    format!("{{\"ok\":true,\"pos\":[{x:.3},{y:.3},{z:.3}]}}")
+                }
+                live_bridge::LiveCmd::LoadLevel(code) => {
+                    self.pending_level = Some(*code);
+                    format!("{{\"ok\":true,\"loading\":\"{:08x}\"}}", code)
+                }
+                live_bridge::LiveCmd::SetHealth(hp) => {
+                    if let Some(sim) = self.scene.sim.as_mut() {
+                        sim.drones.health.health = *hp;
+                        format!("{{\"ok\":true,\"health\":{hp:.1}}}")
+                    } else {
+                        "{\"ok\":false,\"err\":\"no active on-foot sim\"}".into()
+                    }
+                }
+                live_bridge::LiveCmd::GiveWeapon(id) => {
+                    if let Some(sim) = self.scene.sim.as_mut() {
+                        sim.gun.weapon = *id;
+                        format!("{{\"ok\":true,\"weapon\":{id}}}")
+                    } else {
+                        "{\"ok\":false,\"err\":\"no active on-foot sim\"}".into()
+                    }
+                }
+                live_bridge::LiveCmd::MoveDrone { index, x, y, z } => {
+                    if let Some(d) = self.scene.sim.as_mut().and_then(|s| s.drones.list.get_mut(*index)) {
+                        d.pos = [*x, *y, *z];
+                        format!("{{\"ok\":true,\"drone\":{index},\"pos\":[{x:.2},{y:.2},{z:.2}]}}")
+                    } else {
+                        "{\"ok\":false,\"err\":\"drone index out of range\"}".into()
+                    }
+                }
+                live_bridge::LiveCmd::KillDrone(index) => {
+                    if let Some(d) = self.scene.sim.as_mut().and_then(|s| s.drones.list.get_mut(*index)) {
+                        d.health = 0.0;
+                        format!("{{\"ok\":true,\"killed\":{index}}}")
+                    } else {
+                        "{\"ok\":false,\"err\":\"drone index out of range\"}".into()
+                    }
+                }
+                live_bridge::LiveCmd::OpenDoor(index) => {
+                    if let Some(d) = self.scene.sim.as_mut().and_then(|s| s.drones.doors.list.get_mut(*index)) {
+                        d.state = 1;
+                        format!("{{\"ok\":true,\"door\":{index},\"state\":1}}")
+                    } else {
+                        "{\"ok\":false,\"err\":\"door index out of range\"}".into()
+                    }
+                }
+                live_bridge::LiveCmd::SetMovieMode(mode) => {
+                    if let Some(g) = self.gfx.as_mut() {
+                        g.renderer.movie_presentation = match mode.as_str() {
+                            "pillarbox" | "4:3" => gpu::MoviePresentation::Pillarbox,
+                            "cover" => gpu::MoviePresentation::Cover,
+                            _ => gpu::MoviePresentation::Ambient,
+                        };
+                    }
+                    format!("{{\"ok\":true,\"movie_mode\":\"{}\"}}", live_bridge::escape_json(mode))
+                }
+                live_bridge::LiveCmd::Shot(path) => {
+                    self.capture_req = Some(std::path::PathBuf::from(path));
+                    format!("{{\"ok\":true,\"shot\":\"{}\"}}", live_bridge::escape_json(path))
+                }
+            };
+            req.respond(reply);
+        }
+    }
+
     fn bare(iso: String, mut scene: scene::Scene, cam: Camera, opts: scene::ViewOpts, choice: Option<usize>, anim_time: f32) -> App {
         let sound = build_sound(&mut scene);
         App {
@@ -7297,6 +7492,7 @@ impl App {
             prev_keys_q: false,
             driving_end_ticks: None,
             pending_drive_return: None,
+            live_bridge: live_bridge::LiveBridge::from_env(),
             cam,
             gfx: None,
             keys: HashSet::new(),
