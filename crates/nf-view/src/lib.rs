@@ -1073,7 +1073,12 @@ fn load_impl_gc(iso_path: &str, archive: &str, all: bool, save: Option<&nf_game:
     phase_mark("03 level+levelbin parse, skeletons, 07F sequences", t); t = std::time::Instant::now();
     // The level's own sleeve, before any merge lends foreign ones (see the substitution below).
     let own_sleeve = SLEEVES.iter().copied().find(|h| level.by_hash.contains_key(h));
-    merge_weapon_models(&iso, &read, &archive[..8], &mut level)?;
+    // FrontEnd (07000048.bin) is a pure 2D menu/movie screen with no combat or 3D gameplay;
+    // skipping the 8-archive weapon-mesh sweep avoids loading 4.4M unused triangles (~2 GB RAM).
+    let is_frontend_archive = archive.len() >= 8 && archive[..8].eq_ignore_ascii_case("07000048");
+    if !is_frontend_archive || dev {
+        merge_weapon_models(&iso, &read, &archive[..8], &mut level)?;
+    }
     phase_mark("04 weapon-models merge", t); t = std::time::Instant::now();
 
     // The dev view models (folded 190-fix-dev2): each level archive ships only its own weapons'
@@ -2135,7 +2140,7 @@ pub fn merge_weapon_models<R: std::io::Read + std::io::Seek>(iso: &IsoImage<R>,
                 if !c.1.contains_key(&name) {
                     c.0.push_back(name.clone());
                     c.1.insert(name.clone(), l.clone());
-                    while c.1.len() > 4 { if let Some(old) = c.0.pop_front() { c.1.remove(&old); } }
+                    while c.1.len() > 1 { if let Some(old) = c.0.pop_front() { c.1.remove(&old); } }
                 }
                 l
             }

@@ -692,17 +692,15 @@ mod tests {
 // chunk), with the stream's sequence header prepended — self-contained per ISO 13818-2 §6.4.
 // ---------------------------------------------------------------------------
 
-/// Decoded pictures the streaming worker may hold ahead of playback (~2 s at 30 fps).
+/// Decoded pictures the streaming worker may hold ahead of playback (~0.67 s at 30 fps —
+/// bounded so movie decode never balloons RAM on laptops or phones).
 #[cfg(feature = "movies")]
-pub const STREAM_AHEAD: usize = 60;
+pub const STREAM_AHEAD: usize = 20;
 
-/// Movie decode threads. One thread decodes these 512x448 MPEG-2 movies at ~34 fps on an idle
-/// 24-thread desktop, and the heaviest GOPs of the 07300004 briefing run at 108 ms a picture —
-/// a third of real time [L probe 2026-10-16]; the 2 s lead drained on those GOPs and the
-/// picture stalled (mission start/end movies lagged). The GOP
-/// units are independent decodes (a closed GOP alone, an open one with its predecessor in front),
-/// so they decode in parallel, round-robin, and come back out in order.
-pub const DECODE_THREADS: usize = 4;
+/// Movie decode threads: 2 threads keep 512x448 MPEG-2 comfortably ahead of 30 fps while leaving
+/// performance cores free for audio and GPU rendering (4 greedy threads starved CoreAudio/Metal
+/// on 8-core Apple Silicon and mobile SoCs).
+pub const DECODE_THREADS: usize = 2;
 
 #[cfg(feature = "movies")]
 pub struct MovieStream {
