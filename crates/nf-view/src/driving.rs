@@ -426,6 +426,45 @@ fn map_ref_index(r: &nf_game::driving::script::Ref, chunk: &str, stride: usize) 
     }
 }
 
+/// MIS01 (Paris Prelude) POV sniper state (`nf_game::driving::pov` + `flight`,
+/// docs/systems/driving-mis01-opening.md §3, §5, §9, §10).
+pub struct DrivePov {
+    pub arm: nf_game::driving::flight::AimArm,
+    pub active: bool,
+    pub yaw_turns: f32,
+    pub pitch_turns: f32,
+    pub scope_held: bool,
+    pub fov_deg: f32,
+    pub target_fov: f32,
+    pub zoomed_fov: f32,
+    pub ammo: i32,
+    pub last_shot_tick: i32,
+    pub fire: bool,
+    pub fire_flash_ticks: u32,
+    pub hit_flash_ticks: u32,
+}
+
+impl DrivePov {
+    pub fn new(arm: nf_game::driving::flight::AimArm) -> Self {
+        let aim_fov = if arm.aim_fov > 2.0 { arm.aim_fov } else { 20.0 };
+        Self {
+            arm,
+            active: false,
+            yaw_turns: -60.0 / 360.0,
+            pitch_turns: -20.0 / 360.0,
+            scope_held: false,
+            fov_deg: 60.0,
+            target_fov: 60.0,
+            zoomed_fov: aim_fov,
+            ammo: 24,
+            last_shot_tick: -100,
+            fire: false,
+            fire_flash_ticks: 0,
+            hit_flash_ticks: 0,
+        }
+    }
+}
+
 /// Live driving mission simulation state.
 pub struct DrivingState {
     pub viv: String,
@@ -494,6 +533,11 @@ pub struct DrivingState {
     /// The trigger log (`DriveScript::take_fired`): trigger index to (first tick, the walk slot of
     /// the car that first ran it).
     pub trigger_log: std::collections::BTreeMap<usize, (u32, i32)>,
+    /// MIS01 helicopter POV sniper camera + weapon state (`ESetAutoDriveCamOn` -> `ECustomTransition("paris")`).
+    pub pov: Option<DrivePov>,
+    /// True while MIS01 is still in the opening helicopter phase (before `ECustomTransition("paris")`
+    /// swaps to the Aston Martin V12 Vanquish).
+    pub in_heli: bool,
 }
 
 /// The front end's boot difficulty (`GameState+0x28` = 2, Agent [M 0x1c7e78:25]).
@@ -580,9 +624,103 @@ impl DrivingState {
         }
         self.step_fx();
         self.step_weapons();
+        self.step_pov();
         self.step_engine(input.throttle);
         self.step_ai(&input);
         self.step_hostiles();
+    }
+
+    /// True while scripted POV sniper mode (`ESetAutoDriveCamOn`) is active.
+    pub fn pov_active(&self) -> bool {
+        self.intro.as_ref().is_some_and(|(i, _)| i.pov) && self.pov.is_some()
+    }
+
+    /// Feed mouse deltas (in raw mouse counts) into the POV sniper aim.
+    pub fn pov_aim(&mut self, dx: f64, dy: f64) {
+        let Some(p) = self.pov.as_mut() else { return };
+        if !self.intro.as_ref().is_some_and(|(i, _)| i.pov) { return; }
+        let zoom_scale = (p.fov_deg / 60.0).clamp(0.15, 1.0);
+        let sens = 0.00045 * zoom_scale;
+        p.yaw_turns -= dx as f32 * sens;
+        p.pitch_turns -= dy as f32 * sens;
+        p.arm.limits.clamp_view(&mut p.pitch_turns, &mut p.yaw_turns);
+    }
+
+    /// Queue a POV sniper rifle shot.
+    pub fn pov_fire(&mut self) {
+        if let Some(p) = self.pov.as_mut() { p.fire = true; }
+    }
+
+    /// Set whether the POV sniper scope zoom is held.
+    pub fn pov_scope(&mut self, held: bool) {
+        if let Some(p) = self.pov.as_mut() { p.scope_held = held; }
+    }
+
+    /// Active vertical camera FOV in degrees (60° normal driving, ~20° when sniper-scoped).
+    pub fn camera_fov(&self) -> f32 {
+        if self.pov_active() {
+            self.pov.as_ref().map_or(60.0, |p| p.fov_deg)
+        } else {
+            60.0
+        }
+    }
+
+    fn pov_eye_and_angles(&self, p: &DrivePov) -> ([f32; 3], f32, f32) {
+        let eye = [self.car.pos[0], self.car.pos[1] + 0.35, self.car.pos[2]];
+        let yaw = self.car.yaw + p.yaw_turns * std::f32::consts::TAU;
+        let pitch = (p.pitch_turns * std::f32::consts::TAU).clamp(-1.4, 1.4);
+        (eye, yaw, pitch)
+    }
+
+    /// Update MIS01 POV sniper state: initialise start angles on `ESetAutoDriveCamOn`, clamp view
+    /// limits, step scope zoom, and run ray-sphere sniper hit test against live pursuing cars
+    /// (`nf_game::driving::flight::nearest_hit` -> `HostileWorld::damage`, 50 damage/shot [M/D]).
+    fn step_pov(&mut self) {
+        let intro_pov = self.intro.as_ref().map(|(i, _)| (i.pov, i.pov_start_turns));
+        let Some((is_pov, start_turns)) = intro_pov else { return };
+        let Some(mut p) = self.pov.take() else { return };
+        if is_pov && !p.active {
+            p.active = true;
+            if let Some((sy, sp)) = start_turns {
+                p.yaw_turns = sy;
+                p.pitch_turns = sp;
+                p.arm.limits.clamp_view(&mut p.pitch_turns, &mut p.yaw_turns);
+            }
+        } else if !is_pov && p.active {
+            p.active = false;
+            p.scope_held = false;
+            p.fov_deg = 60.0;
+        }
+        p.fire_flash_ticks = p.fire_flash_ticks.saturating_sub(1);
+        p.hit_flash_ticks = p.hit_flash_ticks.saturating_sub(1);
+        if is_pov {
+            let aim_fov = if p.arm.aim_fov > 2.0 { p.arm.aim_fov } else { 20.0 };
+            let target_deg = if p.scope_held { aim_fov } else { 60.0 };
+            p.fov_deg += (target_deg - p.fov_deg) * 0.25;
+            let _ = nf_game::driving::flight::scope_fov(
+                p.scope_held, &mut p.target_fov, &mut p.zoomed_fov, 0.0, 60.0, p.arm.min_fov.max(2.0),
+            );
+            let now = self.ticks as i32;
+            if std::mem::take(&mut p.fire) && p.ammo > 0 && now - p.last_shot_tick >= 5 {
+                p.ammo -= 1;
+                p.last_shot_tick = now;
+                p.fire_flash_ticks = 6;
+                let (eye, yaw, pitch) = self.pov_eye_and_angles(&p);
+                let cp = pitch.cos();
+                let dir = [yaw.sin() * cp, pitch.sin(), yaw.cos() * cp];
+                if let Some(h) = self.hostiles.as_mut() {
+                    let targets: Vec<nf_game::driving::flight::ShotTarget> = h.world.live.iter().map(|v| {
+                        nf_game::driving::flight::ShotTarget { id: v.element, center: v.pos(), radius: 3.5 }
+                    }).collect();
+                    if let Some((elem, _, _)) = nf_game::driving::flight::nearest_hit(eye, dir, &targets) {
+                        h.world.damage(elem, 50.0);
+                        p.hit_flash_ticks = 14;
+                        eprintln!("[mis01 pov] sniper HIT element {elem} (ammo={})", p.ammo);
+                    }
+                }
+            }
+        }
+        self.pov = Some(p);
     }
 
     /// The hostile vehicles for one tick: the script's AI events from the last drain
@@ -859,6 +997,48 @@ impl DrivingState {
                     let first = f.v.len() as u32;
                     f.v.extend_from_slice(&[v([a[0], a[1]]), v([b[0], a[1]]), v([b[0], b[1]]), v([a[0], a[1]]), v([b[0], b[1]]), v([a[0], b[1]])]);
                     f.runs.push((0, 0, first, 6));
+                }
+            }
+        }
+        // MIS01 POV sniper reticle + scope framing when `ESetAutoDriveCamOn` is active.
+        if self.pov_active() {
+            if let Some(p) = self.pov.as_ref() {
+                let mut push_rect = |x0: f32, y0: f32, x1: f32, y1: f32, c: [f32; 4]| {
+                    let v = |px: f32, py: f32| crate::gpu::HudVertex { p: [px, py], uv: [-1.0, -1.0], c };
+                    let first = f.v.len() as u32;
+                    f.v.extend_from_slice(&[v(x0, y1), v(x1, y1), v(x1, y0), v(x0, y1), v(x1, y0), v(x0, y0)]);
+                    f.runs.push((0, 0, first, 6));
+                };
+                if p.scope_held {
+                    // Subtle cinema scope dark borders on the sides.
+                    let dark = [0.0, 0.0, 0.0, 0.72];
+                    let side = (0.72 / aspect.max(1.0)).min(0.65);
+                    push_rect(-1.0, -1.0, -side, 1.0, dark);
+                    push_rect(side, -1.0, 1.0, 1.0, dark);
+                    // Full hairline crosshairs when scoped.
+                    let line = if p.hit_flash_ticks > 0 { [1.0, 0.2, 0.2, 0.95] } else { [0.25, 1.0, 0.45, 0.85] };
+                    let t = 0.003;
+                    push_rect(-side, -t, side, t, line);
+                    push_rect(-t / aspect.max(1.0), -1.0, t / aspect.max(1.0), 1.0, line);
+                } else {
+                    // Unscoped sniper crosshair in center.
+                    let col = if p.hit_flash_ticks > 0 {
+                        [1.0, 0.18, 0.18, 0.95]
+                    } else if p.fire_flash_ticks > 0 {
+                        [1.0, 0.9, 0.35, 0.95]
+                    } else {
+                        [0.35, 1.0, 0.55, 0.9]
+                    };
+                    let rx = 0.045 / aspect.max(1.0);
+                    let ry = 0.045;
+                    let tx = 0.004 / aspect.max(1.0);
+                    let ty = 0.004;
+                    let gap_x = 0.012 / aspect.max(1.0);
+                    let gap_y = 0.012;
+                    push_rect(-rx, -ty, -gap_x, ty, col);
+                    push_rect(gap_x, -ty, rx, ty, col);
+                    push_rect(-tx, gap_y, tx, ry, col);
+                    push_rect(-tx, -ry, tx, -gap_y, col);
                 }
             }
         }
@@ -1166,10 +1346,20 @@ impl DrivingState {
                 }
             }
             if let (Some(sc), Some((i, paths))) = (self.mission.script.as_mut(), self.intro.as_mut()) {
+                let mut reset_trigger: Option<usize> = None;
+                let mut paris_transition = false;
                 for o in sc.take_output() {
                     match o {
                         nf_game::driving::script::Output::StartMission { .. } => i.start_mission(),
+                        nf_game::driving::script::Output::ResetPlayerCar { trigger, .. } => {
+                            reset_trigger = trigger;
+                        }
                         nf_game::driving::script::Output::Effect { action, effect, .. } => {
+                            if let nf_game::driving::script::Effect::Transition { name } = &effect {
+                                if name.as_ref().is_some_and(|r| r.path.to_ascii_lowercase().contains("paris")) {
+                                    paris_transition = true;
+                                }
+                            }
                             if let Some(h) = self.hostiles.as_mut() { h.pending.push(effect.clone()); }
                             i.apply(&action, &sc.map, paths)
                         }
@@ -1178,6 +1368,23 @@ impl DrivingState {
                 }
                 i.out.clear();
                 i.step();
+                if paris_transition {
+                    self.in_heli = false;
+                    eprintln!("[mis01] ECustomTransition(\"paris\") -> switching to Aston Martin V12 Vanquish!");
+                }
+                if let Some(ti) = reset_trigger {
+                    if let Some(tr) = sc.map.triggers.get(ti) {
+                        let p = tr.pos;
+                        let ground = self.collision.ground_y(p[0], p[1] + 2.0, p[2]).unwrap_or(p[1]);
+                        self.car.pos = [p[0], ground + self.car.params.spring_rest, p[2]];
+                        self.car.vel = [0.0; 3];
+                        let yaw = tr.dir[0].atan2(tr.dir[2]);
+                        self.car.yaw = yaw;
+                        let (s, c) = (yaw.sin(), yaw.cos());
+                        self.car.rot = [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]];
+                        eprintln!("[mis01] EResetPlayerCarPos -> trigger {ti} at {:?}", self.car.pos);
+                    }
+                }
                 // A scripted spline carries the car (the path player's row 3 into the car matrix [S]).
                 // The velocity is the path player's: the position step x fps [M 0x1b14b8, 0x131620];
                 // `o` is last tick's spline point, as `step` leaves the body alone on a spline.
@@ -1204,6 +1411,15 @@ impl DrivingState {
     pub fn apply_to_palette_eye(&self, attach_base: usize, pal: &mut [Mat4], eye: [f32; 3]) {
         let frame = self.ticks as f32;
         if let Some(slot) = self.player_attach_slot {
+            if self.in_heli {
+                // Hide the secondary Vanquish while Bond is in the opening helicopter sniper POV.
+                if let Some(r) = &self.car_rig {
+                    for &(_, ps) in &r.parts {
+                        if let Some(m) = pal.get_mut(attach_base + ps as usize) { *m = [[0.0; 4]; 4]; }
+                    }
+                }
+                if let Some(m) = pal.get_mut(attach_base + slot as usize) { *m = [[0.0; 4]; 4]; }
+            } else {
             let car_m: Mat4 = if self.land.is_some() || self.sub.is_some() {
                 let r = self.car.rot;
                 let c = self.car_box_centre;
@@ -1225,6 +1441,7 @@ impl DrivingState {
                 } else {
                     yaw_pos_mat(self.car.pos, self.car.yaw)
                 };
+            }
             }
         }
         for (k, (drv, slot)) in self.ai_cars.iter().enumerate() {
@@ -1264,8 +1481,13 @@ impl DrivingState {
         }
     }
 
-    /// Third-person chase camera behind the player car: `(pos, yaw, pitch)`.
+    /// Third-person chase camera behind the player car (or POV sniper camera on MIS01): `(pos, yaw, pitch)`.
     pub fn chase_camera(&self) -> ([f32; 3], f32, f32) {
+        if self.pov_active() {
+            if let Some(p) = self.pov.as_ref() {
+                return self.pov_eye_and_angles(p);
+            }
+        }
         if let Some(v) = &self.cam_view {
             let yaw = v.fwd[0].atan2(v.fwd[2]);
             let pitch = v.fwd[1].clamp(-1.0, 1.0).asin();
@@ -2449,6 +2671,16 @@ pub fn load_driving_scene_at(iso_path: &str, viv_name: &str, game_difficulty: u3
         difficulty,
         rule_log: Default::default(),
         trigger_log: Default::default(),
+        pov: if viv_upper == "MIS01" {
+            let cam_ini = read_any("camera.ini")
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            let arm = nf_game::driving::flight::AimArm::from_ini(&cam_ini, "CopterAutoDriveCam:Arm0");
+            Some(DrivePov::new(arm))
+        } else {
+            None
+        },
+        in_heli: viv_upper == "MIS01",
         fx,
         reset,
         hud,
@@ -2579,6 +2811,8 @@ mod tests {
             difficulty: 1,
             rule_log: Default::default(),
             trigger_log: Default::default(),
+            pov: None,
+            in_heli: false,
         };
         state.step(1.0, 0.0, 0.0, false);
         assert_eq!(state.progress, 1);

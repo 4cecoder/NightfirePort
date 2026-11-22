@@ -6545,10 +6545,14 @@ impl App {
                     let steer = if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { 1.0 } else { 0.0 }
                         - if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 };
                     let handbrake = self.keys.contains(&KeyCode::Space);
-                    // Weapons: Ctrl fires the selected weapon, Q cycles it (the shipped pad binds R1 /
-                    // d-pad; the keys are the port's) [controls doc: driving-input.md].
-                    if let Some(w) = drv.weapons.as_mut() {
-                        w.fire |= self.keys.contains(&KeyCode::ControlLeft);
+                    // Weapons: Ctrl (or Left-click in POV sniper mode) fires; Right-click zooms sniper scope; Q cycles weapon.
+                    if drv.pov_active() {
+                        if self.trigger || self.keys.contains(&KeyCode::ControlLeft) {
+                            drv.pov_fire();
+                        }
+                        drv.pov_scope(self.zoom || self.keys.contains(&KeyCode::ShiftLeft));
+                    } else if let Some(w) = drv.weapons.as_mut() {
+                        w.fire |= self.keys.contains(&KeyCode::ControlLeft) || self.trigger;
                         w.cycle |= self.keys.contains(&KeyCode::KeyQ) && !self.prev_keys_q;
                     }
                     self.prev_keys_q = self.keys.contains(&KeyCode::KeyQ);
@@ -6560,6 +6564,7 @@ impl App {
                         self.cam.pos = Vec3::new(p[0], p[1], p[2]);
                         self.cam.yaw = yaw;
                         self.cam.pitch = pitch;
+                        self.cam.fov = drv.camera_fov().to_radians();
                     }
                     { let (r, u) = billboard_axes(&self.cam); self.scene.drive_particles = drv.particle_groups(r, u); drv.reflection_frame(&mut self.scene, r, u); }
                     { let a = self.gfx.as_ref().map_or(16.0 / 9.0, |g| g.config.width as f32 / g.config.height.max(1) as f32); let h = drv.hud_frame(&self.scene, a); self.scene.drive_hud = h; }
@@ -7452,7 +7457,11 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: winit::event::DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             if self.grabbed {
-                if self.noclip || self.scene.sim.is_none() {
+                if !self.noclip && self.driving.as_ref().is_some_and(|d| d.pov_active()) {
+                    if let Some(drv) = self.driving.as_mut() {
+                        drv.pov_aim(dx, dy);
+                    }
+                } else if self.noclip || self.scene.sim.is_none() {
                     self.cam.yaw -= dx as f32 * MOUSE_SENSITIVITY;
                     self.cam.pitch = (self.cam.pitch - dy as f32 * MOUSE_SENSITIVITY).clamp(-1.55, 1.55);
                 } else {
