@@ -918,7 +918,7 @@ mod android_impl {
                         strafe: -app.input.move_x,
                         lift: if b & BTN_JUMP != 0 { 1.0 } else { 0.0 }
                             - if b & BTN_CROUCH != 0 { 1.0 } else { 0.0 },
-                        stabilise: false,
+                        stabilise: (b & (BTN_USE | BTN_RELOAD)) != 0,
                         turn: std::mem::take(&mut app.input.turn_accum),
                         look: std::mem::take(&mut app.input.look_accum),
                         jump: just & BTN_JUMP != 0,
@@ -1012,28 +1012,40 @@ mod android_impl {
             }
         }
 
-        // Update camera from driving or on-foot sim
+        // Update camera from driving or on-foot sim (1:1 with desktop nf-view)
         if let Some(drv) = &app.driving {
             let (p, yaw, pitch) = drv.chase_camera();
             app.cam.pos = Vec3::new(p[0], p[1], p[2]);
             app.cam.yaw = yaw;
             app.cam.pitch = pitch;
-            app.cam.fov = GAME_FOV;
+            app.cam.fov = drv.camera_fov().to_radians();
         } else if let Some(sim) = &app.scene.sim {
+            let h = sim.bond.head();
+            app.cam = Camera {
+                pos: Vec3::new(h[0], h[1], h[2]),
+                yaw: sim.bond.yaw,
+                pitch: sim.bond.pitch * std::f32::consts::FRAC_PI_2,
+                fov: GAME_FOV,
+            };
+            if let Some((p, yaw, pitch, fov)) = sim.script_camera() {
+                app.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov };
+            }
             if let Some((p, d)) = sim.view_override() {
-                app.cam.pos = Vec3::new(p[0], p[1], p[2]);
-                app.cam.yaw = d[0].atan2(d[2]);
-                app.cam.pitch = d[1].clamp(-1.0, 1.0).asin();
-                app.cam.fov = GAME_FOV;
-            } else {
-                app.cam.pos = Vec3::new(
-                    sim.bond.pos[0],
-                    sim.bond.pos[1] + sim.bond.eye - sim.bond.crouch_drop,
-                    sim.bond.pos[2],
-                );
-                app.cam.yaw = sim.bond.yaw;
-                app.cam.pitch = sim.bond.pitch;
-                app.cam.fov = GAME_FOV;
+                app.cam = Camera {
+                    pos: Vec3::new(p[0], p[1], p[2]),
+                    yaw: d[0].atan2(d[2]),
+                    pitch: d[1].clamp(-1.0, 1.0).asin(),
+                    fov: GAME_FOV,
+                };
+            }
+            if let Some((p, yaw, pitch, fov)) = sim.creep_camera() {
+                app.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: GAME_FOV / fov };
+            }
+            if let Some((p, yaw, pitch, fov)) = sim.wire_camera() {
+                app.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: GAME_FOV / fov };
+            }
+            if let Some((p, yaw, pitch, fov)) = sim.cam2_camera() {
+                app.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: GAME_FOV / fov };
             }
         }
 
