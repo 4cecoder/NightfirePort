@@ -37,8 +37,24 @@ mod android_impl {
     const BTN_PAUSE: i32 = 1 << 8;
 
     static STATE: Mutex<Option<AndroidApp>> = Mutex::new(None);
+    static LIVE_BRIDGE: OnceLock<Mutex<nf_view::live_bridge::LiveBridge>> = OnceLock::new();
     static TELEMETRY_TX: OnceLock<SyncSender<String>> = OnceLock::new();
     static CONTROL_QUEUE: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+    fn ensure_live_bridge() {
+        if LIVE_BRIDGE.get().is_some() {
+            return;
+        }
+        match nf_view::live_bridge::LiveBridge::bind(9878) {
+            Ok(b) => {
+                log::info!("LiveBridge listening on 127.0.0.1:{}", b.port());
+                let _ = LIVE_BRIDGE.set(Mutex::new(b));
+            }
+            Err(e) => {
+                log::warn!("LiveBridge bind(9878) failed: {e}");
+            }
+        }
+    }
 
     /// Debug telemetry + remote control. Off unless the Kotlin side passes `enable`, which it does
     /// only for a debuggable build launched with the `nf_telemetry` intent extra (see MainActivity).
@@ -166,7 +182,6 @@ mod android_impl {
         last_frame: Instant,
         accum_secs: f64,
         ticks: u32,
-        live_bridge: Option<nf_view::live_bridge::LiveBridge>,
         movie: Option<nf_view::movie::Player>,
         movie_failed: Option<u32>,
     }
@@ -342,6 +357,7 @@ mod android_impl {
                     scene.cels.len(),
                     scene.textures.len()
                 ));
+                ensure_live_bridge();
                 let app = AndroidApp {
                     data_path: path,
                     archive: start_archive.to_string(),
@@ -358,16 +374,6 @@ mod android_impl {
                     last_frame: Instant::now(),
                     accum_secs: 0.0,
                     ticks: 0,
-                    live_bridge: match nf_view::live_bridge::LiveBridge::bind(9878) {
-                        Ok(b) => {
-                            log::info!("LiveBridge listening on 127.0.0.1:{}", b.port());
-                            Some(b)
-                        }
-                        Err(e) => {
-                            log::warn!("LiveBridge bind(9878) failed: {e}");
-                            None
-                        }
-                    },
                     movie: None,
                     movie_failed: None,
                 };
@@ -622,7 +628,7 @@ mod android_impl {
         let mut pending_level: Option<String> = None;
 
         // Drain zero-restart Live Agent Bridge commands on 127.0.0.1:9878 (`adb forward tcp:9878 tcp:9878`)
-        if let Some(reqs) = app.live_bridge.as_ref().map(|b| b.drain()) {
+        if let Some(reqs) = LIVE_BRIDGE.get().and_then(|m| m.lock().ok()).map(|b| b.drain()) {
             use nf_view::live_bridge::{escape_json, LiveCmd};
             for req in reqs {
                 let reply = match &req.cmd {
@@ -755,7 +761,9 @@ mod android_impl {
                         }
                     }
                     LiveCmd::Takeover(on) => {
-                        if let Some(b) = app.live_bridge.as_mut() { b.control.active = *on; }
+                        if let Some(mut b) = LIVE_BRIDGE.get().and_then(|m| m.lock().ok()) {
+                            b.control.active = *on;
+                        }
                         format!("{{\"ok\":true,\"takeover\":{on}}}")
                     }
                     LiveCmd::Input { fwd, right, turn, look, fire, zoom, crouch, .. } => {
