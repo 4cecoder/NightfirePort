@@ -26,8 +26,10 @@ cargo run --release -p nf-macos --bin nf-macos-harness -- "<iso>" --level 090000
 cargo run --release -p nf-macos --bin nf-macos-harness -- "<iso>" --list-levels
 
 # Interactive persistent Metal control REPL (stdin commands -> JSON lines on stdout)
-# Commands: load, input, menu, step, shot, inspect, bench, diff, pos, cam, auto_transition, status, levels, quit
-cargo run --release -p nf-macos --bin nf-macos-harness -- "<iso>" --repl
+# Inspection: status, levels, inspect [all|sim|drones|doors|pickups|objectives|driving|scene|menu|perf]
+# Control:    load, input, menu, step, aim_at, aim_drone, walk_to, skip_cutscene, pos, cam, auto_transition
+# Visual/Perf: shot, bench, diff, quit
+cargo run --release -p nf-macos --bin nf-macos-harness -- "<iso-or-carved-dir>" --repl
 ```
 
 Game data is read directly from the player's own disc image (`.iso`) or carved asset folder; no game bytes are bundled.

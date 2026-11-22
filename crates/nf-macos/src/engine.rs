@@ -337,6 +337,91 @@ impl MacEngine {
         };
     }
 
+    /// Aims Bond's view directly at world-space `target` and updates `self.cam`.
+    pub fn aim_at(&mut self, target: [f32; 3]) -> Result<(f32, f32, f32)> {
+        let sim = self
+            .scene
+            .sim
+            .as_mut()
+            .ok_or_else(|| anyhow!("aim_at requires an active on-foot/MP simulation"))?;
+        let eye = sim.bond.head();
+        let dx = target[0] - eye[0];
+        let dy = target[1] - eye[1];
+        let dz = target[2] - eye[2];
+        let horiz = (dx * dx + dz * dz).sqrt().max(1e-5);
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let yaw = dx.atan2(dz);
+        let pitch_rad = dy.atan2(horiz);
+        sim.bond.yaw = yaw;
+        sim.bond.pitch = (pitch_rad / std::f32::consts::FRAC_PI_2).clamp(-0.99, 0.99);
+        self.cam = sim_camera(sim);
+        Ok((yaw, pitch_rad, dist))
+    }
+
+    /// Aims Bond directly at drone `#idx`'s torso/head.
+    pub fn aim_drone(&mut self, idx: usize) -> Result<(f32, f32, f32)> {
+        let target = {
+            let sim = self
+                .scene
+                .sim
+                .as_ref()
+                .ok_or_else(|| anyhow!("aim_drone requires an active on-foot simulation"))?;
+            let d = sim
+                .drones
+                .list
+                .get(idx)
+                .ok_or_else(|| anyhow!("drone index {idx} out of range (total {})", sim.drones.list.len()))?;
+            [d.pos[0], d.pos[1] + 1.35, d.pos[2]]
+        };
+        self.aim_at(target)
+    }
+
+    /// Steers Bond toward `target` (XZ) for up to `max_ticks`, stopping once within `tolerance` meters.
+    pub fn walk_to(&mut self, target: [f32; 3], max_ticks: u32, tolerance: f32) -> Result<(u32, f32, bool)> {
+        let tol = tolerance.max(0.1);
+        let saved_input = self.input;
+        let mut used = 0u32;
+        for _ in 0..max_ticks.max(1) {
+            let pos = self
+                .scene
+                .sim
+                .as_ref()
+                .ok_or_else(|| anyhow!("walk_to requires an active on-foot/MP simulation"))?
+                .bond
+                .pos;
+            let dx = target[0] - pos[0];
+            let dz = target[2] - pos[2];
+            let dist = (dx * dx + dz * dz).sqrt();
+            if dist <= tol {
+                self.input = saved_input;
+                return Ok((used, dist, true));
+            }
+            if let Some(sim) = self.scene.sim.as_mut() {
+                sim.bond.yaw = dx.atan2(dz);
+            }
+            self.input = InputState {
+                move_y: 1.0,
+                ..Default::default()
+            };
+            self.step(1.0 / 60.0);
+            used += 1;
+        }
+        self.input = saved_input;
+        let pos = self.scene.sim.as_ref().map(|s| s.bond.pos).unwrap_or([0.0; 3]);
+        let dist = ((target[0] - pos[0]).powi(2) + (target[2] - pos[2]).powi(2)).sqrt();
+        Ok((used, dist, dist <= tol))
+    }
+
+    /// Requests the game's native cut-scene skip (`scripts.skip_request = true`).
+    pub fn skip_cutscene(&mut self) -> bool {
+        if let Some(sim) = self.scene.sim.as_mut() {
+            sim.drones.scripts.skip_request = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Steps the active simulation (FrontEnd, On-Foot, or Driving) by `dt_secs`.
     pub fn step(&mut self, dt_secs: f32) -> FrameTelemetry {
         let step_t0 = Instant::now();

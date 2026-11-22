@@ -511,6 +511,31 @@ fn run_repl(engine: &mut MacEngine, cli: &Cli) -> Result<()> {
                 engine.set_camera([x, y, z], yaw, pitch);
                 Ok(format!("{{\"ok\":true,\"telemetry\":{}}}", engine.telemetry().to_json()))
             })(),
+            "aim_at" => (|| -> Result<String> {
+                let x: f32 = parts.get(1).ok_or_else(|| anyhow!("aim_at <x> <y> <z>"))?.parse()?;
+                let y: f32 = parts.get(2).ok_or_else(|| anyhow!("aim_at <x> <y> <z>"))?.parse()?;
+                let z: f32 = parts.get(3).ok_or_else(|| anyhow!("aim_at <x> <y> <z>"))?.parse()?;
+                let (yaw, pitch, dist) = engine.aim_at([x, y, z])?;
+                Ok(format!("{{\"ok\":true,\"yaw\":{yaw:.4},\"pitch\":{pitch:.4},\"dist\":{dist:.2},\"telemetry\":{}}}", engine.telemetry().to_json()))
+            })(),
+            "aim_drone" => (|| -> Result<String> {
+                let idx: usize = parts.get(1).ok_or_else(|| anyhow!("aim_drone <idx>"))?.parse()?;
+                let (yaw, pitch, dist) = engine.aim_drone(idx)?;
+                Ok(format!("{{\"ok\":true,\"drone\":{idx},\"yaw\":{yaw:.4},\"pitch\":{pitch:.4},\"dist\":{dist:.2},\"telemetry\":{}}}", engine.telemetry().to_json()))
+            })(),
+            "walk_to" => (|| -> Result<String> {
+                let x: f32 = parts.get(1).ok_or_else(|| anyhow!("walk_to <x> <y> <z> [max_ticks] [tol]"))?.parse()?;
+                let y: f32 = parts.get(2).ok_or_else(|| anyhow!("walk_to <x> <y> <z> [max_ticks] [tol]"))?.parse()?;
+                let z: f32 = parts.get(3).ok_or_else(|| anyhow!("walk_to <x> <y> <z> [max_ticks] [tol]"))?.parse()?;
+                let max_ticks: u32 = parts.get(4).map(|s| s.parse()).transpose()?.unwrap_or(180);
+                let tol: f32 = parts.get(5).map(|s| s.parse()).transpose()?.unwrap_or(1.0);
+                let (ticks, dist, reached) = engine.walk_to([x, y, z], max_ticks, tol)?;
+                Ok(format!("{{\"ok\":true,\"ticks\":{ticks},\"dist\":{dist:.2},\"reached\":{reached},\"telemetry\":{}}}", engine.telemetry().to_json()))
+            })(),
+            "skip_cutscene" => {
+                let sent = engine.skip_cutscene();
+                Ok(format!("{{\"ok\":true,\"skip_sent\":{sent}}}"))
+            }
             _ => Err(anyhow!("unknown command: {cmd}")),
         };
         match resp {

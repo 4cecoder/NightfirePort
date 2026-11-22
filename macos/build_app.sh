@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
 
-FEATURES="${NF_CARGO_FEATURES:-}"
+FEATURES="${NF_CARGO_FEATURES:-movies}"
 FEAT_ARGS=()
 if [[ -n "$FEATURES" ]]; then
   FEAT_ARGS=(--features "$FEATURES")

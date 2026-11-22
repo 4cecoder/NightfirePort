@@ -108,22 +108,29 @@ impl FrameDiff {
     }
 }
 
-/// Builds a deep JSON snapshot of internal engine state (`all`, `sim`, `drones`, `driving`, `scene`, `menu`, `perf`).
+/// Builds a deep JSON snapshot of internal engine state
+/// (`all`, `sim`, `drones`, `driving`, `doors`, `pickups`, `objectives`, `scene`, `menu`, `perf`).
 pub fn inspect_json(engine: &MacEngine, topic: &str) -> String {
     match topic {
         "sim" => inspect_sim(engine),
         "drones" => inspect_drones(engine),
         "driving" => inspect_driving(engine),
+        "doors" => inspect_doors(engine),
+        "pickups" => inspect_pickups(engine),
+        "objectives" => inspect_objectives(engine),
         "scene" => inspect_scene(engine),
         "menu" => inspect_menu(engine),
         "perf" => engine.perf.to_json(),
         _ => format!(
-            "{{\"telemetry\":{},\"perf\":{},\"scene\":{},\"sim\":{},\"drones\":{},\"driving\":{},\"menu\":{}}}",
+            "{{\"telemetry\":{},\"perf\":{},\"scene\":{},\"sim\":{},\"drones\":{},\"doors\":{},\"pickups\":{},\"objectives\":{},\"driving\":{},\"menu\":{}}}",
             engine.telemetry().to_json(),
             engine.perf.to_json(),
             inspect_scene(engine),
             inspect_sim(engine),
             inspect_drones(engine),
+            inspect_doors(engine),
+            inspect_pickups(engine),
+            inspect_objectives(engine),
             inspect_driving(engine),
             inspect_menu(engine),
         ),
@@ -239,6 +246,111 @@ fn inspect_drones(engine: &MacEngine) -> String {
         alive,
         alerted,
         nearest.join(",")
+    )
+}
+
+fn inspect_doors(engine: &MacEngine) -> String {
+    let Some(sim) = engine.scene.sim.as_ref() else {
+        return "null".to_string();
+    };
+    let bp = sim.bond.pos;
+    let closed = sim.drones.doors.closed_flags();
+    let mut rows: Vec<(f32, String)> = sim
+        .drones
+        .doors
+        .list
+        .iter()
+        .enumerate()
+        .map(|(idx, d)| {
+            let dx = d.pos[0] - bp[0];
+            let dy = d.pos[1] - bp[1];
+            let dz = d.pos[2] - bp[2];
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+            let is_closed = closed.get(idx).copied().unwrap_or(false);
+            (
+                dist,
+                format!(
+                    "{{\"idx\":{},\"state\":{},\"closed\":{},\"pos\":[{:.2},{:.2},{:.2}],\"dist\":{:.2}}}",
+                    idx, d.state, is_closed, d.pos[0], d.pos[1], d.pos[2], dist
+                ),
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let list: Vec<String> = rows.into_iter().take(16).map(|(_, s)| s).collect();
+    format!(
+        "{{\"total\":{},\"closed\":{},\"nearest\":[{}]}}",
+        sim.drones.doors.list.len(),
+        closed.iter().filter(|&&c| c).count(),
+        list.join(",")
+    )
+}
+
+fn inspect_pickups(engine: &MacEngine) -> String {
+    let Some(sim) = engine.scene.sim.as_ref() else {
+        return "null".to_string();
+    };
+    let bp = sim.bond.pos;
+    let mut rows: Vec<(f32, String)> = sim
+        .drones
+        .pickups
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.gone && !p.hidden)
+        .map(|(idx, p)| {
+            let pos = [p.m[3][0], p.m[3][1], p.m[3][2]];
+            let dx = pos[0] - bp[0];
+            let dy = pos[1] - bp[1];
+            let dz = pos[2] - bp[2];
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+            (
+                dist,
+                format!(
+                    "{{\"idx\":{},\"kind\":{},\"weapon\":{},\"rounds\":{},\"pos\":[{:.2},{:.2},{:.2}],\"dist\":{:.2}}}",
+                    idx, p.kind, p.weapon, p.rounds, pos[0], pos[1], pos[2], dist
+                ),
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let active = rows.len();
+    let list: Vec<String> = rows.into_iter().take(16).map(|(_, s)| s).collect();
+    format!(
+        "{{\"total\":{},\"active\":{},\"nearest\":[{}]}}",
+        sim.drones.pickups.len(),
+        active,
+        list.join(",")
+    )
+}
+
+fn inspect_objectives(engine: &MacEngine) -> String {
+    let Some(sim) = engine.scene.sim.as_ref() else {
+        return "null".to_string();
+    };
+    let m = &sim.drones.mission;
+    let lang = engine.lang.as_ref().or(sim.lang.as_ref());
+    let n = m.num_vis_objectives();
+    let mut items = Vec::with_capacity(n);
+    for i in 0..n {
+        if let Some(o) = m.objective_state(i) {
+            let label = lang
+                .and_then(|l| l.bind(o.text))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| format!("0x{:x}", o.text));
+            items.push(format!(
+                "{{\"idx\":{},\"state\":{},\"text_id\":\"0x{:x}\",\"text\":{}}}",
+                i,
+                o.state,
+                o.text,
+                json_escape(&label)
+            ));
+        }
+    }
+    format!(
+        "{{\"ended\":{},\"count\":{},\"items\":[{}]}}",
+        m.ended,
+        items.len(),
+        items.join(",")
     )
 }
 
