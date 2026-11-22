@@ -11613,6 +11613,7 @@ fn page_rows_no_head(h: &mut Hud, fe: &FrontEnd, font: &nf_formats::hud::Font, y
 /// The keyboard mapping the host uses. The game's menu engine walks cursors with the d-pad and
 /// confirms with the action buttons [M 0x21c3d8's per-controller action loop]; the port adds keyboard
 /// per the task ("mouse and keyboard work everywhere") [S].
+#[cfg(not(target_os = "android"))]
 pub fn key_action(key: winit::keyboard::KeyCode) -> Option<Action> {
     use winit::keyboard::KeyCode;
     Some(match key {
@@ -11699,6 +11700,7 @@ pub const MOUSE_RIGHT_ACTION: Action = Action::Back;
 /// (docs/systems/codename-entry.md). `None` keeps the key on `key_action` — the space bar
 /// stays Confirm (the game's X presses the focused cell), and Backspace maps to the ← cell
 /// 1000 by the caller [M :39-42, the erase].
+#[cfg(not(target_os = "android"))]
 pub fn cnname_char_key(key: winit::keyboard::KeyCode) -> Option<u32> {
     use winit::keyboard::KeyCode;
     let c = match key {
@@ -11755,6 +11757,7 @@ pub fn wheel_scroll_action(y: f32) -> Option<Action> {
 /// (a colon is Shift+Semicolon on the US layout, and the physical key is what arrives) [S §2.2;
 /// the task's typed set is digits, dots, colon]. Numpad digits and the numpad decimal point
 /// count too.
+#[cfg(not(target_os = "android"))]
 pub fn net_char_key(key: winit::keyboard::KeyCode) -> Option<char> {
     use winit::keyboard::KeyCode;
     Some(match key {

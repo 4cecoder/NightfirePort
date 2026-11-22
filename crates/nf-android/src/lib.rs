@@ -364,7 +364,7 @@ mod android_impl {
         width: jint,
         height: jint,
     ) -> jboolean {
-        init_logger_once();
+        init_logger_once(false);
         let mut guard = STATE.lock().unwrap();
         let Some(app) = guard.as_mut() else {
             log::error!("nativeSurfaceCreated called before nativeInit");
@@ -641,9 +641,26 @@ mod android_impl {
 
                 let throttle = (app.input.move_y.max(0.0) + if b & BTN_FIRE != 0 { 1.0 } else { 0.0 }).min(1.0);
                 let brake = ((-app.input.move_y).max(0.0) + if b & BTN_AIM != 0 { 1.0 } else { 0.0 }).min(1.0);
-                let steer = app.input.move_x;
+                let steer = -app.input.move_x;
                 let handbrake = b & BTN_JUMP != 0;
+                if drv.pov_active() {
+                    let (dx, dy) = (
+                        std::mem::take(&mut app.input.turn_accum),
+                        std::mem::take(&mut app.input.look_accum),
+                    );
+                    if dx != 0.0 || dy != 0.0 {
+                        drv.pov_aim(dx as f64 * 12.0, dy as f64 * 12.0);
+                    }
+                    if b & BTN_FIRE != 0 {
+                        drv.pov_fire();
+                    }
+                    drv.pov_scope(b & BTN_AIM != 0);
+                } else if let Some(w) = drv.weapons.as_mut() {
+                    w.fire |= b & BTN_FIRE != 0;
+                    w.cycle |= just & BTN_RELOAD != 0;
+                }
                 drv.step(throttle, brake, steer, handbrake);
+                app.cam.fov = drv.camera_fov().to_radians();
 
                 if matches!(
                     drv.mission_state,
@@ -858,6 +875,8 @@ mod android_impl {
         gfx.renderer.set_char_light_centres(&app.scene);
         gfx.renderer.lights = app.scene.frame_lights();
         gfx.renderer.screen_aspect = aspect;
+        let is_menu_backdrop = app.fe.as_ref().is_some_and(|fe| !fe.intro_playing && fe.flow.get_state() != menu::ST_MOVIE);
+        gfx.renderer.movie_presentation = nf_view::gpu::adaptive_movie_mode(is_menu_backdrop);
         gfx.renderer.destroy_dead = dead_destroy_centres(&app.scene);
         gfx.renderer.destroy_wreck_draw = wreck_draw_centres(&app.scene);
         gfx.renderer.sky_flash_mask = app.scene.sim.as_ref().map_or(0, |s| s.drones.sky.flash_mask);
@@ -884,7 +903,11 @@ mod android_impl {
                 None => overlay_for(&app.scene, aspect),
             }
         });
-        let hud = shot_hud(&app.scene, aspect, menu_hud.as_ref(), false);
+        let hud = if let Some(drv) = app.driving.as_mut() {
+            drv.hud_frame(&app.scene, aspect)
+        } else {
+            shot_hud(&app.scene, aspect, menu_hud.as_ref(), false)
+        };
 
         let render_t0 = Instant::now();
         let enc = gfx.renderer.render(
