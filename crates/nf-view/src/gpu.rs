@@ -213,7 +213,7 @@ fn morph_pos(p0: vec3<f32>, mtb: i32, mwb: u32, cnt: u32, tend: u32) -> vec3<f32
 "#;
 
 /// The overlay (crosshair, HUD): screen-space triangles in normalised device coordinates, alpha-blended, no depth.
-pub(crate) const HUD_SHADER: &str = r#"
+pub const HUD_SHADER: &str = r#"
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 struct HO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) c: vec4<f32> };
@@ -267,7 +267,7 @@ fn sample_smooth(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
 ///   MPEG-2 blockiness cleanly without `smoothstep` stair-stepping or ringing).
 /// - When `i.c.a < 0.99`, renders a soft 9-tap Gaussian-blurred ambient cinema glow for ultrawide
 ///   wings instead of hard black bars or sharp mirrored artifacts.
-pub(crate) const MOVIE_SHADER: &str = r#"
+pub const MOVIE_SHADER: &str = r#"
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 struct MO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) c: vec4<f32> };
@@ -531,6 +531,7 @@ pub struct Renderer {
     movie_pipeline: wgpu::RenderPipeline,
     movie_sampler: wgpu::Sampler,
     movie_crop_v: f32,
+    surface_format: wgpu::TextureFormat,
     pipelines: Vec<(Draw, wgpu::RenderPipeline)>,
     /// Snow: the particle pipeline (additive, depth test, no write), a per-frame vertex buffer and the flake texture.
     snow_pipeline: wgpu::RenderPipeline,
@@ -1196,7 +1197,7 @@ impl Renderer {
             for ch in &cel_graph.chains { for &c in ch { if (c as usize) < n { reached[c as usize] = true; } } }
             reached.iter().map(|r| !r).collect()
         };
-        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, movie_presentation: MoviePresentation::Pillarbox, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler, movie_pipeline, movie_sampler, movie_crop_v: 0.0, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
+        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, movie_presentation: MoviePresentation::Pillarbox, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler, movie_pipeline, movie_sampler, movie_crop_v: 0.0, surface_format: format, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
     }
 
     /// The game's depth-0 pyramid for the walk [M `Vision_Calculate_View_Fustrum` 0x1e7df8,
@@ -1420,6 +1421,122 @@ impl Renderer {
     /// world vertices), uploaded before `render`.
     /// particle-textures: this frame's emitter sprites (`Scene::particle_draws` — scene texture
     /// index or None for the white fallback, additive, world vertices), uploaded before `render`.
+    /// Hot-reload the HUD or Movie WGSL shader live at runtime without restarting the game.
+    /// Uses wgpu's `ErrorFilter::Validation` scope so invalid WGSL never crashes the running app
+    /// and leaves the previous live pipeline intact on error.
+    pub fn reload_shader(&mut self, device: &wgpu::Device, target: &str, wgsl: &str) -> Result<(), String> {
+        if target != "movie" && target != "hud" {
+            return Err(format!("unknown shader target '{target}' (expected 'hud' or 'movie')"));
+        }
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("nf-view hot-reload layout"),
+            bind_group_layouts: &[Some(&self.hud_tbgl)],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nf-view hot-reload shader"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let format = self.surface_format;
+        match target {
+            "movie" => {
+                let pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("nf-view movie (hot-reloaded)"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<HudVertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                        })],
+                    },
+                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_movie"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                if let Some(err) = pollster::block_on(scope.pop()) {
+                    return Err(format!("shader validation failed: {err}"));
+                }
+                self.movie_pipeline = pipe;
+                Ok(())
+            }
+            "hud" => {
+                let make = |blend: wgpu::BlendState| {
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("nf-view hud (hot-reloaded)"),
+                        layout: Some(&layout),
+                        vertex: wgpu::VertexState {
+                            module: &shader,
+                            entry_point: Some("vs"),
+                            compilation_options: Default::default(),
+                            buffers: &[Some(wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<HudVertex>() as u64,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                            })],
+                        },
+                        primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                        depth_stencil: Some(wgpu::DepthStencilState {
+                            format: DEPTH,
+                            depth_write_enabled: Some(false),
+                            depth_compare: Some(wgpu::CompareFunction::Always),
+                            stencil: Default::default(),
+                            bias: Default::default(),
+                        }),
+                        multisample: Default::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module: &shader,
+                            entry_point: Some("fs_ps2"),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+                };
+                let hud_alpha = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
+                let p0 = make(wgpu::BlendState {
+                    color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+                    alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+                });
+                let p1 = make(wgpu::BlendState {
+                    color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+                    alpha: hud_alpha,
+                });
+                let p2 = make(wgpu::BlendState {
+                    color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::ReverseSubtract },
+                    alpha: hud_alpha,
+                });
+                if let Some(err) = pollster::block_on(scope.pop()) {
+                    return Err(format!("shader validation failed: {err}"));
+                }
+                self.hud_pipeline = p0;
+                self.hud_add_pipeline = p1;
+                self.hud_sub_pipeline = p2;
+                Ok(())
+            }
+            _ => unreachable!(),
+        }
+    }
+
     pub fn set_particles(&mut self, queue: &wgpu::Queue, groups: &[(Option<usize>, bool, Vec<crate::scene::Vertex>)]) {
         self.particle_groups.clear();
         let mut all: Vec<crate::scene::Vertex> = Vec::new();

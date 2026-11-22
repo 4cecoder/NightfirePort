@@ -166,6 +166,9 @@ mod android_impl {
         last_frame: Instant,
         accum_secs: f64,
         ticks: u32,
+        live_bridge: Option<nf_view::live_bridge::LiveBridge>,
+        movie: Option<nf_view::movie::Player>,
+        movie_failed: Option<u32>,
     }
 
     // Scene's Option<Box<dyn MpSession>> is never used on a separate thread; all access goes through STATE Mutex.
@@ -336,6 +339,9 @@ mod android_impl {
                     last_frame: Instant::now(),
                     accum_secs: 0.0,
                     ticks: 0,
+                    live_bridge: nf_view::live_bridge::LiveBridge::bind(9878).ok(),
+                    movie: None,
+                    movie_failed: None,
                 };
                 *STATE.lock().unwrap() = Some(app);
                 log::info!("nativeInit: loaded {start_archive} successfully in {ms}ms");
@@ -586,6 +592,159 @@ mod android_impl {
         app.accum_secs += dt;
 
         let mut pending_level: Option<String> = None;
+
+        // Drain zero-restart Live Agent Bridge commands on 127.0.0.1:9878 (`adb forward tcp:9878 tcp:9878`)
+        if let Some(reqs) = app.live_bridge.as_ref().map(|b| b.drain()) {
+            use nf_view::live_bridge::{escape_json, LiveCmd};
+            for req in reqs {
+                let reply = match &req.cmd {
+                    LiveCmd::Ping => "{\"ok\":true,\"pong\":true,\"platform\":\"android\"}".into(),
+                    LiveCmd::State => {
+                        let pos = if let Some(drv) = app.driving.as_ref() {
+                            drv.car.pos
+                        } else if let Some(sim) = app.scene.sim.as_ref() {
+                            sim.bond.pos
+                        } else {
+                            [app.cam.pos.x, app.cam.pos.y, app.cam.pos.z]
+                        };
+                        let hp = app.scene.sim.as_ref().map_or(100.0, |s| s.drones.health.health);
+                        let weapon = app.scene.sim.as_ref().map_or(0, |s| s.gun.weapon);
+                        format!(
+                            "{{\"ok\":true,\"platform\":\"android\",\"archive\":\"{}\",\"pos\":[{:.3},{:.3},{:.3}],\"health\":{:.1},\"weapon\":{},\"driving\":{}}}",
+                            escape_json(&app.archive), pos[0], pos[1], pos[2], hp, weapon, app.driving.is_some()
+                        )
+                    }
+                    LiveCmd::Drones => {
+                        let mut items = Vec::new();
+                        if let Some(sim) = app.scene.sim.as_ref() {
+                            for (i, d) in sim.drones.list.iter().enumerate() {
+                                items.push(format!("{{\"i\":{},\"pos\":[{:.2},{:.2},{:.2}],\"hp\":{:.1}}}", i, d.pos[0], d.pos[1], d.pos[2], d.health));
+                            }
+                        }
+                        format!("{{\"ok\":true,\"count\":{},\"drones\":[{}]}}", items.len(), items.join(","))
+                    }
+                    LiveCmd::Doors => {
+                        let mut items = Vec::new();
+                        if let Some(sim) = app.scene.sim.as_ref() {
+                            for (i, d) in sim.drones.doors.list.iter().enumerate() {
+                                items.push(format!("{{\"i\":{},\"pos\":[{:.2},{:.2},{:.2}],\"state\":{}}}", i, d.pos[0], d.pos[1], d.pos[2], d.state));
+                            }
+                        }
+                        format!("{{\"ok\":true,\"count\":{},\"doors\":[{}]}}", items.len(), items.join(","))
+                    }
+                    LiveCmd::Driving => {
+                        if let Some(drv) = app.driving.as_ref() {
+                            format!("{{\"ok\":true,\"viv\":\"{}\",\"ticks\":{},\"pos\":[{:.2},{:.2},{:.2}],\"pov\":{},\"in_heli\":{}}}", drv.viv, drv.ticks, drv.car.pos[0], drv.car.pos[1], drv.car.pos[2], drv.pov_active(), drv.in_heli)
+                        } else {
+                            "{\"ok\":false,\"err\":\"not in driving mode\"}".into()
+                        }
+                    }
+                    LiveCmd::Teleport { x, y, z, yaw, pitch } => {
+                        if let Some(drv) = app.driving.as_mut() {
+                            drv.car.pos = [*x, *y, *z];
+                            drv.car.vel = [0.0; 3];
+                            if let Some(yw) = yaw { drv.car.yaw = *yw; }
+                        } else if let Some(sim) = app.scene.sim.as_mut() {
+                            sim.bond.pos = [*x, *y, *z];
+                            sim.bond.vel = [0.0; 3];
+                            if let Some(yw) = yaw { sim.bond.yaw = *yw; }
+                            if let Some(pt) = pitch { sim.bond.pitch = *pt; }
+                        }
+                        app.cam.pos = Vec3::new(*x, *y, *z);
+                        format!("{{\"ok\":true,\"pos\":[{x:.2},{y:.2},{z:.2}]}}")
+                    }
+                    LiveCmd::LoadLevel(code) => {
+                        pending_level = Some(format!("{code:08x}.bin"));
+                        format!("{{\"ok\":true,\"loading\":\"{:08x}.bin\"}}", code)
+                    }
+                    LiveCmd::SetHealth(hp) => {
+                        if let Some(sim) = app.scene.sim.as_mut() {
+                            sim.drones.health.health = *hp;
+                            format!("{{\"ok\":true,\"health\":{hp:.1}}}")
+                        } else {
+                            "{\"ok\":false,\"err\":\"no active sim\"}".into()
+                        }
+                    }
+                    LiveCmd::GiveWeapon(id) => {
+                        if let Some(sim) = app.scene.sim.as_mut() {
+                            sim.gun.weapon = *id;
+                            format!("{{\"ok\":true,\"weapon\":{id}}}")
+                        } else {
+                            "{\"ok\":false,\"err\":\"no active sim\"}".into()
+                        }
+                    }
+                    LiveCmd::MoveDrone { index, x, y, z } => {
+                        if let Some(d) = app.scene.sim.as_mut().and_then(|s| s.drones.list.get_mut(*index)) {
+                            d.pos = [*x, *y, *z];
+                            format!("{{\"ok\":true,\"drone\":{index},\"pos\":[{x:.2},{y:.2},{z:.2}]}}")
+                        } else {
+                            "{\"ok\":false,\"err\":\"drone index out of range\"}".into()
+                        }
+                    }
+                    LiveCmd::KillDrone(index) => {
+                        if let Some(d) = app.scene.sim.as_mut().and_then(|s| s.drones.list.get_mut(*index)) {
+                            d.health = 0.0;
+                            format!("{{\"ok\":true,\"killed\":{index}}}")
+                        } else {
+                            "{\"ok\":false,\"err\":\"drone index out of range\"}".into()
+                        }
+                    }
+                    LiveCmd::OpenDoor(index) => {
+                        if let Some(d) = app.scene.sim.as_mut().and_then(|s| s.drones.doors.list.get_mut(*index)) {
+                            d.state = 1;
+                            format!("{{\"ok\":true,\"door\":{index},\"state\":1}}")
+                        } else {
+                            "{\"ok\":false,\"err\":\"door index out of range\"}".into()
+                        }
+                    }
+                    LiveCmd::SetMovieMode(mode) => {
+                        if let Some(g) = app.gfx.as_mut() {
+                            g.renderer.movie_presentation = match mode.as_str() {
+                                "pillarbox" | "4:3" => nf_view::gpu::MoviePresentation::Pillarbox,
+                                "cover" => nf_view::gpu::MoviePresentation::Cover,
+                                _ => nf_view::gpu::MoviePresentation::Ambient,
+                            };
+                        }
+                        format!("{{\"ok\":true,\"movie_mode\":\"{}\"}}", escape_json(mode))
+                    }
+                    LiveCmd::ReloadShader { target, path } => {
+                        let src_res: Result<String, String> = if path.eq_ignore_ascii_case("default") {
+                            match target.as_str() {
+                                "hud" => Ok(nf_view::gpu::HUD_SHADER.to_string()),
+                                "movie" => Ok(nf_view::gpu::MOVIE_SHADER.to_string()),
+                                _ => Err(format!("unknown shader target '{target}'")),
+                            }
+                        } else {
+                            std::fs::read_to_string(path).map_err(|e| format!("read '{path}': {e}"))
+                        };
+                        match (src_res, app.gfx.as_mut()) {
+                            (Ok(src), Some(g)) => match g.renderer.reload_shader(&g.device, target, &src) {
+                                Ok(()) => format!("{{\"ok\":true,\"reloaded\":\"{}\"}}", escape_json(target)),
+                                Err(e) => format!("{{\"ok\":false,\"err\":\"{}\"}}", escape_json(&e)),
+                            },
+                            (Err(e), _) => format!("{{\"ok\":false,\"err\":\"{}\"}}", escape_json(&e)),
+                            (_, None) => "{\"ok\":false,\"err\":\"no active GPU renderer\"}".into(),
+                        }
+                    }
+                    LiveCmd::Takeover(on) => {
+                        if let Some(b) = app.live_bridge.as_mut() { b.control.active = *on; }
+                        format!("{{\"ok\":true,\"takeover\":{on}}}")
+                    }
+                    LiveCmd::Input { fwd, right, turn, look, fire, zoom, crouch, .. } => {
+                        app.input.move_y = *fwd;
+                        app.input.move_x = *right;
+                        app.input.turn_accum += *turn;
+                        app.input.look_accum += *look;
+                        if *fire { app.input.buttons |= BTN_FIRE; } else { app.input.buttons &= !BTN_FIRE; }
+                        if *zoom { app.input.buttons |= BTN_AIM; } else { app.input.buttons &= !BTN_AIM; }
+                        if *crouch { app.input.buttons |= BTN_CROUCH; } else { app.input.buttons &= !BTN_CROUCH; }
+                        "{\"ok\":true}".into()
+                    }
+                    LiveCmd::Shot(_) => "{\"ok\":false,\"err\":\"use adb screencap on Android\"}".into(),
+                };
+                req.respond(reply);
+            }
+        }
 
         // Drain debug control commands (127.0.0.1:9877; empty unless telemetry was enabled)
         while let Some(cmd) = CONTROL_QUEUE.lock().unwrap().pop_front() {
@@ -909,6 +1068,95 @@ mod android_impl {
             shot_hud(&app.scene, aspect, menu_hud.as_ref(), false)
         };
 
+        // Step FrontEnd / intro / briefing MPEG-2 movie player (1:1 with desktop nf-view)
+        let mut movie_frame_owned: Option<(u32, u32, Vec<u8>)> = None;
+        if let Some(fe) = app.fe.as_mut() {
+            let vol = 100u32;
+            if fe.intro_movie {
+                let code = fe.intro_movie_code();
+                let need_start = app.movie.as_ref().map_or(true, |p| p.code() != code)
+                    && app.movie_failed != Some(code);
+                if need_start {
+                    match nf_view::movie::Player::start(&app.data_path, code, vol) {
+                        Ok(p) => {
+                            app.movie = Some(p);
+                            app.movie_failed = None;
+                        }
+                        Err(_) => {
+                            app.movie = None;
+                            app.movie_failed = Some(code);
+                            fe.intro_movie_finished();
+                        }
+                    }
+                }
+                if let Some(p) = app.movie.as_mut() {
+                    if let Some((w, h, rgba)) = p.present() {
+                        movie_frame_owned = Some((w, h, rgba.to_vec()));
+                    }
+                    if p.finished() {
+                        app.movie = None;
+                        fe.intro_movie_finished();
+                    } else {
+                        fe.intro_live = true;
+                    }
+                }
+            } else if fe.flow.get_state() == menu::ST_MOVIE {
+                let code = fe.flow.movie_code;
+                let need_start = app.movie.as_ref().map_or(true, |p| p.code() != code)
+                    && app.movie_failed != Some(code);
+                if need_start {
+                    match nf_view::movie::Player::start(&app.data_path, code, vol) {
+                        Ok(p) => {
+                            app.movie = Some(p);
+                            app.movie_failed = None;
+                        }
+                        Err(_) => {
+                            app.movie = None;
+                            app.movie_failed = Some(code);
+                            fe.flow.pop_state();
+                        }
+                    }
+                }
+                if let Some(p) = app.movie.as_mut() {
+                    if let Some((w, h, rgba)) = p.present() {
+                        movie_frame_owned = Some((w, h, rgba.to_vec()));
+                    }
+                    if p.finished() {
+                        app.movie = None;
+                        fe.flow.pop_state();
+                    }
+                }
+            } else {
+                let aux = menu::aux_movie_for(fe.page_id());
+                if aux != 0 {
+                    let need_start = app.movie.as_ref().map_or(true, |p| p.code() != aux || !p.is_looping())
+                        && app.movie_failed != Some(aux);
+                    if need_start {
+                        match nf_view::movie::Player::start_looping(&app.data_path, aux, vol) {
+                            Ok(p) => {
+                                app.movie = Some(p);
+                                app.movie_failed = None;
+                            }
+                            Err(_) => {
+                                app.movie = None;
+                                app.movie_failed = Some(aux);
+                            }
+                        }
+                    }
+                    if let Some(p) = app.movie.as_mut() {
+                        if let Some((w, h, rgba)) = p.present() {
+                            movie_frame_owned = Some((w, h, rgba.to_vec()));
+                        }
+                    }
+                } else {
+                    app.movie = None;
+                }
+            }
+        } else {
+            app.movie = None;
+        }
+        let movie_arg = movie_frame_owned.as_ref().map(|(w, h, r)| (*w, *h, r.as_slice()));
+
         let render_t0 = Instant::now();
         let enc = gfx.renderer.render(
             &gfx.device,
@@ -921,7 +1169,7 @@ mod android_impl {
             app.ticks,
             &snow,
             &hud,
-            None,
+            movie_arg,
             None,
         );
         gfx.queue.submit([enc.finish()]);

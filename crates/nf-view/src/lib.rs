@@ -7474,6 +7474,25 @@ impl App {
                     }
                     format!("{{\"ok\":true,\"movie_mode\":\"{}\"}}", live_bridge::escape_json(mode))
                 }
+                live_bridge::LiveCmd::ReloadShader { target, path } => {
+                    let src_res: Result<String, String> = if path.eq_ignore_ascii_case("default") {
+                        match target.as_str() {
+                            "hud" => Ok(gpu::HUD_SHADER.to_string()),
+                            "movie" => Ok(gpu::MOVIE_SHADER.to_string()),
+                            _ => Err(format!("unknown shader target '{target}'")),
+                        }
+                    } else {
+                        std::fs::read_to_string(path).map_err(|e| format!("read '{path}': {e}"))
+                    };
+                    match (src_res, self.gfx.as_mut()) {
+                        (Ok(src), Some(g)) => match g.renderer.reload_shader(&g.device, target, &src) {
+                            Ok(()) => format!("{{\"ok\":true,\"reloaded\":\"{}\"}}", live_bridge::escape_json(target)),
+                            Err(e) => format!("{{\"ok\":false,\"err\":\"{}\"}}", live_bridge::escape_json(&e)),
+                        },
+                        (Err(e), _) => format!("{{\"ok\":false,\"err\":\"{}\"}}", live_bridge::escape_json(&e)),
+                        (_, None) => "{\"ok\":false,\"err\":\"no active GPU renderer\"}".into(),
+                    }
+                }
                 live_bridge::LiveCmd::Shot(path) => {
                     self.capture_req = Some(std::path::PathBuf::from(path));
                     format!("{{\"ok\":true,\"shot\":\"{}\"}}", live_bridge::escape_json(path))

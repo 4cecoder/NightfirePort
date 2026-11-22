@@ -75,6 +75,10 @@ pub enum LiveCmd {
     KillDrone(usize),
     OpenDoor(usize),
     SetMovieMode(String),
+    ReloadShader {
+        target: String,
+        path: String,
+    },
     Shot(String),
 }
 
@@ -305,6 +309,15 @@ pub fn parse_command(line: &str) -> Result<LiveCmd, String> {
         "movie_mode" | "set_movie_mode" => {
             let mode = parts.get(1).ok_or("usage: movie_mode <ambient|cover|pillarbox>")?.to_ascii_lowercase();
             Ok(LiveCmd::SetMovieMode(mode))
+        }
+        "reload_shader" => {
+            if parts.len() < 3 {
+                return Err("usage: reload_shader <hud|movie> <path.wgsl|default>".into());
+            }
+            Ok(LiveCmd::ReloadShader {
+                target: parts[1].to_ascii_lowercase(),
+                path: parts[2].to_string(),
+            })
         }
         "shot" => {
             let path = parts.get(1).ok_or("usage: shot <path.png>")?.to_string();

@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 nf-formats = { path = "../nf-formats" }
 nf-game = { path = "../nf-game" }
-nf-view = { path = "../nf-view" }
+nf-view = { path = "../nf-view", features = ["movies"] }
 nf-audio = { path = "../nf-audio" }
 anyhow.workspace = true
 wgpu = "30.0.1"

@@ -413,90 +413,139 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
     @Composable
     private fun MenuOverlayControls(modifier: Modifier = Modifier) {
         val haptic = LocalHapticFeedback.current
-        Box(modifier = modifier.padding(horizontal = 24.dp, vertical = 22.dp)) {
-            // Left D-Pad
-            Column(
-                modifier = Modifier.align(Alignment.BottomStart),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+        Box(
+            modifier = modifier
+                .safeDrawingPadding()
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+        ) {
+            // Bottom-Left compact ergonomic cross D-Pad
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .size(148.dp)
             ) {
-                MenuPadBtn("Up", Icons.Default.ArrowUpward) {
+                MenuPadBtn("Up", Icons.Default.ArrowUpward, Modifier.align(Alignment.TopCenter)) {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     NativeBridge.nativeMenuAction(NativeBridge.MENU_UP)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(26.dp)) {
-                    MenuPadBtn("Left", Icons.AutoMirrored.Filled.ArrowBack) {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        NativeBridge.nativeMenuAction(NativeBridge.MENU_LEFT)
-                    }
-                    MenuPadBtn("Right", Icons.AutoMirrored.Filled.ArrowForward) {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        NativeBridge.nativeMenuAction(NativeBridge.MENU_RIGHT)
-                    }
+                MenuPadBtn("Left", Icons.AutoMirrored.Filled.ArrowBack, Modifier.align(Alignment.CenterStart)) {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    NativeBridge.nativeMenuAction(NativeBridge.MENU_LEFT)
                 }
-                MenuPadBtn("Down", Icons.Default.ArrowDownward) {
+                MenuPadBtn("Right", Icons.AutoMirrored.Filled.ArrowForward, Modifier.align(Alignment.CenterEnd)) {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    NativeBridge.nativeMenuAction(NativeBridge.MENU_RIGHT)
+                }
+                MenuPadBtn("Down", Icons.Default.ArrowDownward, Modifier.align(Alignment.BottomCenter)) {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     NativeBridge.nativeMenuAction(NativeBridge.MENU_DOWN)
                 }
             }
 
-            // Right PS2-style action cluster
-            Column(
-                modifier = Modifier.align(Alignment.BottomEnd),
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+            // Bottom-Right authentic PS2 diamond face-button cluster with crisp vector symbols
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(164.dp)
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            NativeBridge.nativeMenuAction(NativeBridge.MENU_SIDE)
-                        },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB0BAC5))
-                    ) {
-                        Text("□ Side", fontSize = 12.sp)
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            NativeBridge.nativeMenuAction(NativeBridge.MENU_EXTRA)
-                        },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB0BAC5))
-                    ) {
-                        Text("○ Extra", fontSize = 12.sp)
-                    }
+                Ps2FaceBtn(
+                    kind = "triangle",
+                    caption = "Back",
+                    accent = Color(0xFF4ADE80),
+                    modifier = Modifier.align(Alignment.TopCenter)
+                ) {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    NativeBridge.nativeMenuAction(NativeBridge.MENU_BACK)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    FilledTonalButton(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            NativeBridge.nativeMenuAction(NativeBridge.MENU_BACK)
-                        },
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = Color(0xCC2A1E24),
-                            contentColor = Color(0xFFFF8A80)
-                        )
-                    ) {
-                        Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("△ Back")
-                    }
-                    Button(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            NativeBridge.nativeMenuAction(NativeBridge.MENU_CONFIRM)
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFD4AF37),
-                            contentColor = Color(0xFF0D1117)
-                        )
-                    ) {
-                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("✕ Select", fontWeight = FontWeight.Bold)
+                Ps2FaceBtn(
+                    kind = "square",
+                    caption = "Side",
+                    accent = Color(0xFFF472B6),
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    NativeBridge.nativeMenuAction(NativeBridge.MENU_SIDE)
+                }
+                Ps2FaceBtn(
+                    kind = "circle",
+                    caption = "Extra",
+                    accent = Color(0xFFF87171),
+                    modifier = Modifier.align(Alignment.CenterEnd)
+                ) {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    NativeBridge.nativeMenuAction(NativeBridge.MENU_EXTRA)
+                }
+                Ps2FaceBtn(
+                    kind = "cross",
+                    caption = "Select",
+                    accent = Color(0xFFD4AF37),
+                    primary = true,
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                ) {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    NativeBridge.nativeMenuAction(NativeBridge.MENU_CONFIRM)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun Ps2FaceBtn(
+        kind: String,
+        caption: String,
+        accent: Color,
+        modifier: Modifier = Modifier,
+        primary: Boolean = false,
+        onClick: () -> Unit
+    ) {
+        Column(
+            modifier = modifier,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Surface(
+                onClick = onClick,
+                shape = CircleShape,
+                color = if (primary) Color(0xDD1F2633) else Color(0xBB151B24),
+                border = androidx.compose.foundation.BorderStroke(
+                    width = if (primary) 2.dp else 1.5.dp,
+                    color = accent.copy(alpha = if (primary) 0.95f else 0.72f)
+                ),
+                modifier = Modifier.size(if (primary) 54.dp else 48.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize().padding(13.dp)) {
+                    val sw = 2.6.dp.toPx()
+                    val w = size.width
+                    val h = size.height
+                    when (kind) {
+                        "cross" -> {
+                            drawLine(accent, Offset(0f, 0f), Offset(w, h), strokeWidth = sw)
+                            drawLine(accent, Offset(w, 0f), Offset(0f, h), strokeWidth = sw)
+                        }
+                        "circle" -> {
+                            drawCircle(accent, radius = (minOf(w, h) / 2f), style = Stroke(width = sw))
+                        }
+                        "square" -> {
+                            drawRect(accent, style = Stroke(width = sw))
+                        }
+                        "triangle" -> {
+                            val path = androidx.compose.ui.graphics.Path().apply {
+                                moveTo(w / 2f, 0f)
+                                lineTo(w, h)
+                                lineTo(0f, h)
+                                close()
+                            }
+                            drawPath(path, accent, style = Stroke(width = sw))
+                        }
                     }
                 }
             }
+            Text(
+                text = caption,
+                color = Color(0xFFE6EDF3),
+                fontSize = 10.sp,
+                fontWeight = if (primary) FontWeight.Bold else FontWeight.Medium
+            )
         }
     }
 
@@ -504,17 +553,20 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
     private fun MenuPadBtn(
         label: String,
         icon: androidx.compose.ui.graphics.vector.ImageVector,
+        modifier: Modifier = Modifier,
         onClick: () -> Unit
     ) {
         FilledTonalIconButton(
             onClick = onClick,
-            modifier = Modifier.size(52.dp),
+            modifier = modifier
+                .size(48.dp)
+                .border(1.dp, Color(0x55E6EDF3), CircleShape),
             colors = IconButtonDefaults.filledTonalIconButtonColors(
-                containerColor = Color(0xBB1B222C),
+                containerColor = Color(0xBB151B24),
                 contentColor = Color(0xFFE6EDF3)
             )
         ) {
-            Icon(icon, contentDescription = label)
+            Icon(icon, contentDescription = label, modifier = Modifier.size(22.dp))
         }
     }
 
