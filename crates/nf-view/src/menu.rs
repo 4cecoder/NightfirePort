@@ -12083,5 +12083,5 @@ pub(crate) fn draw_keypad_page(h: &mut Hud, kp: &nf_game::lock::Keypad, font: &n
     }
 }
 
-/// The developer switch for the unfinished driving missions (`NF_DRIVING=1`).
-pub fn driving_enabled() -> bool { std::env::var("NF_DRIVING").is_ok_and(|v| v == "1") }
+/// All 5 driving missions are enabled by default; set `NF_DRIVING=0` to opt out.
+pub fn driving_enabled() -> bool { !std::env::var("NF_DRIVING").is_ok_and(|v| v == "0") }
