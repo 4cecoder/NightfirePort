@@ -3,9 +3,11 @@
 //! Multiplayer, and Driving modes.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use glam::Vec3;
+use crate::inspect::{BenchReport, PerfStats};
 use nf_view::driving::{
     driving_viv_for_level, load_driving_scene_at, DrivingState, BOOT_DIFFICULTY,
 };
@@ -171,6 +173,7 @@ pub struct MacEngine {
     pub difficulty: u32,
     pub ticks: u32,
     pub input: InputState,
+    pub perf: PerfStats,
     prev_buttons: i32,
     pending_menu_actions: Vec<MenuAction>,
     pending_level: Option<String>,
@@ -217,6 +220,7 @@ impl MacEngine {
             difficulty: opts.difficulty,
             ticks: 0,
             input: InputState::default(),
+            perf: PerfStats::default(),
             prev_buttons: 0,
             pending_menu_actions: Vec::new(),
             pending_level: None,
@@ -335,6 +339,7 @@ impl MacEngine {
 
     /// Steps the active simulation (FrontEnd, On-Foot, or Driving) by `dt_secs`.
     pub fn step(&mut self, dt_secs: f32) -> FrameTelemetry {
+        let step_t0 = Instant::now();
         let dt = dt_secs.clamp(1.0 / 240.0, 1.0 / 15.0);
         let n_ticks = ((dt * 60.0).round() as u32).clamp(1, 4);
         let just = self.input.buttons & !self.prev_buttons;
@@ -493,6 +498,8 @@ impl MacEngine {
             }
         }
 
+        self.perf.last_step_ms = step_t0.elapsed().as_secs_f64() * 1000.0;
+        self.perf.total_cels = self.scene.cels.len();
         self.telemetry()
     }
 
@@ -554,6 +561,7 @@ impl MacEngine {
             up: opts_up,
         };
 
+        let skin_t0 = Instant::now();
         let door_closed = self
             .scene
             .sim
@@ -565,6 +573,10 @@ impl MacEngine {
             self.scene.sim.as_ref().map(|s| &s.world),
             door_closed.as_deref(),
         );
+        let visible_cels = vis
+            .as_ref()
+            .map(|v| v.iter().filter(|&&b| b).count())
+            .unwrap_or(self.scene.cels.len());
 
         m.renderer.destroy_dead = dead_destroy_centres(&self.scene);
         m.renderer.destroy_wreck_draw = wreck_draw_centres(&self.scene);
@@ -607,6 +619,8 @@ impl MacEngine {
             .set_particles(&m.queue, &particles_for(&self.scene, &cam));
         m.renderer
             .set_reflection(&m.queue, self.scene.drive_reflection.as_ref().map(|r| &r.frame));
+        let skin_ms = skin_t0.elapsed().as_secs_f64() * 1000.0;
+        let render_t0 = Instant::now();
 
         let target = m.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("nf-macos-target"),
@@ -712,7 +726,9 @@ impl MacEngine {
         }
         drop(mapped);
         buf.unmap();
+        let render_ms = render_t0.elapsed().as_secs_f64() * 1000.0;
 
+        let enc_t0 = Instant::now();
         let (mean_luma, std_luma) = luma_stats(&rgba, w, h);
         let png_bytes = nf_formats::png::encode_rgba(w, h, &rgba);
         let out_path = out_path.as_ref();
@@ -722,12 +738,224 @@ impl MacEngine {
             }
         }
         std::fs::write(out_path, png_bytes)?;
+        let encode_ms = enc_t0.elapsed().as_secs_f64() * 1000.0;
+
+        self.perf.last_skin_ms = skin_ms;
+        self.perf.last_render_ms = render_ms;
+        self.perf.last_encode_ms = encode_ms;
+        self.perf.last_visible_cels = visible_cels;
+        self.perf.total_cels = self.scene.cels.len();
 
         Ok(RenderStats {
             width: w,
             height: h,
             mean_luma,
             std_luma,
+        })
+    }
+
+    /// Benchmarks `frames` consecutive 60 Hz sim + Metal GPU frames (no PNG disk write)
+    /// and returns real frame-time percentiles and estimated FPS.
+    pub fn bench_frames(&mut self, frames: u32, width: u32, height: u32) -> Result<BenchReport> {
+        let frames = frames.max(1);
+        let w = width.max(64);
+        let h = height.max(64);
+        let aspect = w as f32 / h as f32;
+        if self.metal.is_none() {
+            self.metal = Some(MetalContext::new(&self.scene)?);
+        }
+        let target = {
+            let m = self.metal.as_ref().unwrap();
+            m.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("nf-macos-bench-target"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: m.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        };
+        let view = target.create_view(&Default::default());
+        let depth = {
+            let m = self.metal.as_ref().unwrap();
+            gpu::depth_view(&m.device, w, h)
+        };
+
+        let mut totals = Vec::with_capacity(frames as usize);
+        let mut sim_sum = 0.0f64;
+        let mut skin_sum = 0.0f64;
+        let mut gpu_sum = 0.0f64;
+
+        for _ in 0..frames {
+            let f0 = Instant::now();
+            self.step(1.0 / 60.0);
+            let sim_ms = self.perf.last_step_ms;
+            sim_sum += sim_ms;
+
+            let skin_t0 = Instant::now();
+            if let Some(drv) = self.driving.as_mut() {
+                let (r, u) = billboard_axes(&self.cam);
+                self.scene.drive_particles = drv.particle_groups(r, u);
+                drv.reflection_frame(&mut self.scene, r, u);
+                self.scene.drive_hud = drv.hud_frame(&self.scene, aspect);
+            }
+            let m = self.metal.as_mut().unwrap();
+            let cam = self
+                .scene
+                .sim
+                .as_ref()
+                .and_then(|s| s.view_override())
+                .map(|(p, d)| Camera {
+                    pos: Vec3::new(p[0], p[1], p[2]),
+                    yaw: d[0].atan2(d[2]),
+                    pitch: d[1].clamp(-1.0, 1.0).asin(),
+                    fov: GAME_FOV,
+                })
+                .unwrap_or(self.cam);
+            let cut = self
+                .scene
+                .sim
+                .as_ref()
+                .is_some_and(|s| s.script_camera().is_some());
+            let game_aspect = self.scene.sim.as_ref().map_or(4.0 / 3.0, |s| s.view_aspect);
+            let (proj_aspect, band) = if cut {
+                cutscene_frame(w as f32, h as f32, game_aspect)
+            } else {
+                (aspect, [0.0; 4])
+            };
+            let (vp, vp_rot) = cam.view_proj_for(proj_aspect, self.scene.mirror_x);
+            let (opts_right, opts_up) = cam_axes(&cam);
+            let opts = ViewOpts {
+                reinforcements: false,
+                firing: (self.input.buttons & BTN_FIRE) != 0,
+                right: opts_right,
+                up: opts_up,
+            };
+            let door_closed = self
+                .scene
+                .sim
+                .as_ref()
+                .map(|s| s.drones.doors.closed_flags());
+            let vis = m.renderer.cel_visibility(
+                cam.pos.to_array(),
+                vp,
+                self.scene.sim.as_ref().map(|s| &s.world),
+                door_closed.as_deref(),
+            );
+            m.renderer.destroy_dead = dead_destroy_centres(&self.scene);
+            m.renderer.destroy_wreck_draw = wreck_draw_centres(&self.scene);
+            m.renderer.destroy_tint = destroy_tints(&self.scene);
+            m.renderer.sky_flash_mask = self
+                .scene
+                .sim
+                .as_ref()
+                .map_or(0, |s| s.drones.sky.flash_mask);
+            m.renderer.sky_spin = self.scene.sim.as_ref().map_or(0.0, |s| s.drones.sky.spin());
+            m.renderer
+                .update_skin(&m.queue, &self.scene, None, self.ticks as f32, opts, None);
+            let decal_cells = self.scene.decal_cell_entries(&m.renderer.skin_layout);
+            if self.driving.is_some() || (vis.is_some() && !decal_cells.is_empty()) {
+                let mut pal = self
+                    .scene
+                    .skin_palette(&m.renderer.skin_layout, None, self.ticks as f32, opts, None)
+                    .0;
+                if let Some(v) = vis.as_deref() {
+                    self.scene.hide_unseen_decals(&mut pal, &decal_cells, v);
+                }
+                if let Some(drv) = self.driving.as_ref() {
+                    drv.apply_to_palette_eye(
+                        m.renderer.skin_layout.attach_base as usize,
+                        &mut pal,
+                        [cam.pos.x, cam.pos.y, cam.pos.z],
+                    );
+                }
+                m.renderer.upload_palette(&m.queue, &pal);
+            }
+            m.renderer.upload_morph_weights(&m.queue, &self.scene);
+            m.renderer.set_char_light_centres(&self.scene);
+            m.renderer.lights = self.scene.frame_lights();
+            m.renderer.screen_aspect = aspect;
+            m.renderer.set_shards(&m.queue, &self.scene.shard_draws());
+            m.renderer
+                .set_particles(&m.queue, &particles_for(&self.scene, &cam));
+            m.renderer
+                .set_reflection(&m.queue, self.scene.drive_reflection.as_ref().map(|r| &r.frame));
+            let skin_ms = skin_t0.elapsed().as_secs_f64() * 1000.0;
+            skin_sum += skin_ms;
+
+            let gpu_t0 = Instant::now();
+            let snow = snow_for(&self.scene, &cam);
+            let menu_hud = self.fe.as_mut().map(|fe| {
+                let lang = self
+                    .lang
+                    .as_ref()
+                    .or_else(|| self.scene.sim.as_ref().and_then(|s| s.lang.as_ref()));
+                fe.view_h = h as f32;
+                match &self.scene.hud {
+                    Some(tables) => menu::menu_overlay_fonts(
+                        fe,
+                        &tables.font,
+                        &tables.font_header,
+                        Some(&tables.font_medium),
+                        lang,
+                        &self.scene.hud_textures,
+                        proj_aspect,
+                    ),
+                    None => overlay_for(&self.scene, proj_aspect),
+                }
+            });
+            let hud = shot_hud(&self.scene, proj_aspect, menu_hud.as_ref(), false);
+            let enc = m.renderer.render(
+                &m.device,
+                &m.queue,
+                &view,
+                &depth,
+                vp,
+                vp_rot,
+                cam.pos.to_array(),
+                self.ticks,
+                &snow,
+                &hud,
+                None,
+                if cut { Some(band) } else { None },
+            );
+            m.queue.submit([enc.finish()]);
+            let _ = m.device.poll(wgpu::PollType::wait_indefinitely());
+            let gpu_ms = gpu_t0.elapsed().as_secs_f64() * 1000.0;
+            gpu_sum += gpu_ms;
+
+            totals.push(f0.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        totals.sort_by(|a, b| a.total_cmp(b));
+        let n = totals.len() as f64;
+        let avg_ms = totals.iter().sum::<f64>() / n;
+        let p50_ms = totals[(totals.len() / 2).min(totals.len() - 1)];
+        let p95_idx = ((totals.len() as f64 * 0.95).floor() as usize).min(totals.len() - 1);
+        let p95_ms = totals[p95_idx];
+        let min_ms = totals[0];
+        let max_ms = *totals.last().unwrap();
+        let est_fps = if avg_ms > 0.001 { 1000.0 / avg_ms } else { 0.0 };
+
+        Ok(BenchReport {
+            frames,
+            width: w,
+            height: h,
+            avg_ms,
+            p50_ms,
+            p95_ms,
+            min_ms,
+            max_ms,
+            est_fps,
+            avg_sim_ms: sim_sum / n,
+            avg_skin_ms: skin_sum / n,
+            avg_gpu_ms: gpu_sum / n,
         })
     }
 
@@ -959,7 +1187,7 @@ fn luma_stats(rgba: &[u8], w: u32, h: u32) -> (f64, f64) {
     (mean, var.sqrt())
 }
 
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for ch in s.chars() {

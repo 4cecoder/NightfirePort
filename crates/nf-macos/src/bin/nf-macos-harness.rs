@@ -29,6 +29,7 @@ use nfmacos::engine::{
     discover_levels, InputState, LoadOptions, MacEngine, BTN_AIM, BTN_CROUCH, BTN_FIRE, BTN_JUMP,
     BTN_PAUSE, BTN_RELOAD, BTN_USE, BTN_WEAP_NEXT, BTN_WEAP_PREV,
 };
+use nfmacos::inspect::{diff_png_files, inspect_json};
 
 struct Cli {
     data_path: PathBuf,
@@ -361,6 +362,26 @@ fn run_repl(engine: &mut MacEngine, cli: &Cli) -> Result<()> {
                 break;
             }
             "status" => Ok(format!("{{\"ok\":true,\"telemetry\":{}}}", engine.telemetry().to_json())),
+            "inspect" => {
+                let topic = parts.get(1).copied().unwrap_or("all");
+                Ok(format!("{{\"ok\":true,\"topic\":\"{topic}\",\"data\":{}}}", inspect_json(engine, topic)))
+            }
+            "bench" => (|| -> Result<String> {
+                let n: u32 = parts.get(1).map(|s| s.parse()).transpose()?.unwrap_or(60);
+                let (w, h) = match parts.get(2) {
+                    Some(sz) => parse_size(sz)?,
+                    None => (cli.width, cli.height),
+                };
+                let rep = engine.bench_frames(n, w, h)?;
+                Ok(format!("{{\"ok\":true,\"bench\":{}}}", rep.to_json()))
+            })(),
+            "diff" => (|| -> Result<String> {
+                let a = parts.get(1).copied().ok_or_else(|| anyhow!("diff <a.png> <b.png> [out_diff.png]"))?;
+                let b = parts.get(2).copied().ok_or_else(|| anyhow!("diff <a.png> <b.png> [out_diff.png]"))?;
+                let out = parts.get(3).map(std::path::Path::new);
+                let d = diff_png_files(std::path::Path::new(a), std::path::Path::new(b), out)?;
+                Ok(format!("{{\"ok\":true,\"diff\":{}}}", d.to_json()))
+            })(),
             "levels" => {
                 let lvls = engine.list_levels();
                 let arr: Vec<String> = lvls.iter().map(|s| format!("\"{s}\"")).collect();

@@ -26,7 +26,7 @@ cargo run --release -p nf-macos --bin nf-macos-harness -- "<iso>" --level 090000
 cargo run --release -p nf-macos --bin nf-macos-harness -- "<iso>" --list-levels
 
 # Interactive persistent Metal control REPL (stdin commands -> JSON lines on stdout)
-# Commands: load, input, menu, step, shot, pos, cam, auto_transition, status, levels, quit
+# Commands: load, input, menu, step, shot, inspect, bench, diff, pos, cam, auto_transition, status, levels, quit
 cargo run --release -p nf-macos --bin nf-macos-harness -- "<iso>" --repl
 ```
 

@@ -4,3 +4,4 @@
 //! against `nf-view` and `nf-android` across FrontEnd, On-Foot, Multiplayer, and Driving modes.
 
 pub mod engine;
+pub mod inspect;
