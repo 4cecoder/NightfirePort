@@ -353,6 +353,9 @@ impl crate::driving::DrivingState {
     /// over the base (`name=envmap` ALPHA 0x48 = Cs·As + Cd), vertex alpha 127. Call after
     /// `particle_groups` with the same camera axes; the group goes right after the shine's.
     pub fn reflection_frame(&self, scene: &mut Scene, right: [f32; 3], up: [f32; 3]) {
+        if self.in_heli {
+            return;
+        }
         let (Some(rf), Some(ms)) = (self.reflection.as_ref(), scene.drive_reflection.as_mut()) else { return };
         // The main view's forward axis (camera + 0x20, into the scene), as the shine takes it.
         let f = cross(up, right);
