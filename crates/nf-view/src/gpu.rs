@@ -2328,9 +2328,10 @@ pub fn movie_quad_verts_cropped(screen_aspect: f32, mode: MoviePresentation, let
     // Center quad dimensions & UVs (always 1:1 pixel aspect, zero stretching).
     let (cx, cy, u0, u1, v0, v1) = match mode {
         MoviePresentation::Cover if aspect > content_aspect + 0.01 => {
-            // Uniformly scale up to 1.75x so 16:10, 16:9, and 20:9/21:9 phone & ultrawide screens
-            // fill edge-to-edge with zero stretching, falling back to ambient wings only on 32:9.
-            let zoom = (aspect / content_aspect).min(1.75);
+            // Gentle aspect-preserving zoom (capped at 1.22x so at most ~9% top/bottom is ever
+            // cropped — never cutting off logos, faces, or UI) paired with seamless Gaussian
+            // ambient wings on 16:9, 20:9 phones, and 21:9/32:9 ultrawides.
+            let zoom = (aspect / content_aspect).min(1.22);
             let sx = (fit_sx * zoom).min(1.0);
             let extra_v = active_v * (1.0 - 1.0 / zoom) * 0.5;
             (sx, 1.0, 0.0, 1.0, lb + extra_v, 1.0 - lb - extra_v)
@@ -2338,10 +2339,11 @@ pub fn movie_quad_verts_cropped(screen_aspect: f32, mode: MoviePresentation, let
         _ => (fit_sx, fit_sy, 0.0, 1.0, lb, 1.0 - lb),
     };
 
-    // Soft Gaussian-blurred ambient glow wings (c.a = 0.5 triggers `sample_ambient_blur` in MOVIE_SHADER).
+    // Soft Gaussian-blurred ambient glow wings (c.a = 0.5 triggers `sample_ambient_blur` in MOVIE_SHADER)
+    // tuned to blend smoothly from the picture edge out to the display bezel without harsh dark bars.
     if mode != MoviePresentation::Pillarbox && cx < 0.995 {
-        let outer = [0.04, 0.04, 0.05, 0.5];
-        let inner = [0.18, 0.18, 0.20, 0.5];
+        let outer = [0.24, 0.24, 0.28, 0.5];
+        let inner = [0.62, 0.62, 0.64, 0.5];
         let vl = |x: f32, y: f32, u: f32, v: f32, c: [f32; 4]| HudVertex { p: [x, y], uv: [u, v], c };
         verts.extend_from_slice(&[
             vl(-1.0, cy, 0.04, v0, outer), vl(-cx, cy, 0.04, v0, inner), vl(-cx, -cy, 0.04, v1, inner),
@@ -2467,13 +2469,14 @@ mod shader_tests {
             }
         }
         // Sister assertions: Ambient emits ambient wings on 21:9 (24 verts) vs Pillarbox (12 verts);
-        // Cover fills 16:9 and 20:9/21:9 edge-to-edge (12 verts, cx=1.0) and adds wings on 32:9 (24 verts).
+        // Cover fills 16:10 edge-to-edge (12 verts, cx=1.0) and pairs gentle 1.22x zoom with seamless
+        // ambient wings on 21:9/32:9 (24 verts) so important content is never over-cropped.
         assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Pillarbox).len(), 12);
         assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Ambient).len(), 24);
-        let cover_16_9 = movie_quad_verts(16.0 / 9.0, MoviePresentation::Cover);
-        assert_eq!(cover_16_9.len(), 12);
-        assert!((cover_16_9[7].p[0] - 1.0).abs() < 1e-3, "16:9 Cover fills width cleanly");
-        assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Cover).len(), 12);
+        let cover_16_10 = movie_quad_verts(16.0 / 10.0, MoviePresentation::Cover);
+        assert_eq!(cover_16_10.len(), 12);
+        assert!((cover_16_10[7].p[0] - 1.0).abs() < 1e-3, "16:10 Cover fills width cleanly");
+        assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Cover).len(), 24);
         assert_eq!(movie_quad_verts(32.0 / 9.0, MoviePresentation::Cover).len(), 24);
     }
     /// Letterbox detection finds baked 16:9 cinema bars inside 512x448 frames, returns 0.0 for
