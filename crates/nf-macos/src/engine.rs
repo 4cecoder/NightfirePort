@@ -17,8 +17,8 @@ use nf_view::scene::{Scene, ViewOpts};
 use nf_view::{
     billboard_axes, build_sound, cam_axes, cutscene_frame, dead_destroy_centres, destroy_tints,
     device, gpu_instance_headless, load_front_end, load_mp_carry, load_with_carry_difficulty,
-    overlay_for, particles_for, shot_hud, snow_for, sound_tick, wreck_draw_centres, Camera,
-    GAME_FOV,
+    overlay_for, particles_for, shot_hud, snow_for, sound_tick, view_fov, wreck_draw_centres,
+    Camera, GAME_FOV,
 };
 
 pub const BTN_FIRE: i32 = 1 << 0;
@@ -473,21 +473,7 @@ impl MacEngine {
                 use_key = false;
                 self.ticks = self.ticks.wrapping_add(1);
             }
-            if let Some((p, d)) = sim.view_override() {
-                self.cam.pos = Vec3::new(p[0], p[1], p[2]);
-                self.cam.yaw = d[0].atan2(d[2]);
-                self.cam.pitch = d[1].clamp(-1.0, 1.0).asin();
-                self.cam.fov = GAME_FOV;
-            } else {
-                self.cam.pos = Vec3::new(
-                    sim.bond.pos[0],
-                    sim.bond.pos[1] + sim.bond.eye - sim.bond.crouch_drop,
-                    sim.bond.pos[2],
-                );
-                self.cam.yaw = sim.bond.yaw;
-                self.cam.pitch = sim.bond.pitch;
-                self.cam.fov = GAME_FOV;
-            }
+            self.cam = sim_camera(sim);
         } else {
             self.ticks = self.ticks.wrapping_add(n_ticks);
         }
@@ -1149,27 +1135,54 @@ fn load_scene_for(
     } else {
         load_with_carry_difficulty(data_path, archive, false, None, opts.difficulty)?
     };
-    let (pos, yaw) = scene
+    let cam = scene
         .sim
         .as_ref()
-        .map(|s| {
-            (
-                [
-                    s.bond.pos[0],
-                    s.bond.pos[1] + s.bond.eye - s.bond.crouch_drop,
-                    s.bond.pos[2],
-                ],
-                s.bond.yaw,
-            )
-        })
-        .unwrap_or(([0.0, 1.6, 0.0], 0.0));
-    let cam = Camera {
-        pos: Vec3::new(pos[0], pos[1], pos[2]),
-        yaw,
-        pitch: 0.0,
-        fov: GAME_FOV,
-    };
+        .map(sim_camera)
+        .unwrap_or(Camera {
+            pos: Vec3::new(0.0, 1.6, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov: GAME_FOV,
+        });
     Ok((scene, None, None, cam, archive.to_string()))
+}
+
+/// Computes the exact camera matching `nf-view`'s priority:
+/// `bond.head()` + `view_fov(sim)` -> `script_camera()` -> `wire_camera()` -> `view_override()`.
+fn sim_camera(sim: &nf_view::scene::Sim) -> Camera {
+    let h = sim.bond.head();
+    let mut cam = Camera {
+        pos: Vec3::new(h[0], h[1], h[2]),
+        yaw: sim.bond.yaw,
+        pitch: sim.bond.pitch * std::f32::consts::FRAC_PI_2,
+        fov: view_fov(sim),
+    };
+    if let Some((p, yaw, pitch, fov)) = sim.script_camera() {
+        cam = Camera {
+            pos: Vec3::new(p[0], p[1], p[2]),
+            yaw,
+            pitch,
+            fov,
+        };
+    }
+    if let Some((p, yaw, pitch, fov)) = sim.wire_camera() {
+        cam = Camera {
+            pos: Vec3::new(p[0], p[1], p[2]),
+            yaw,
+            pitch,
+            fov: GAME_FOV / fov,
+        };
+    }
+    if let Some((p, d)) = sim.view_override() {
+        cam = Camera {
+            pos: Vec3::new(p[0], p[1], p[2]),
+            yaw: d[0].atan2(d[2]),
+            pitch: d[1].clamp(-1.0, 1.0).asin(),
+            fov: GAME_FOV,
+        };
+    }
+    cam
 }
 
 fn luma_stats(rgba: &[u8], w: u32, h: u32) -> (f64, f64) {
