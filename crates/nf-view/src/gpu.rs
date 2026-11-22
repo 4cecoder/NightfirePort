@@ -591,6 +591,8 @@ pub struct Renderer {
     /// loading picture fill the PS2's 4:3 picture [M DecodeBGFMVFrame 0x108550 — 512×448 centred]; stretched to a
     /// 16:9 window they were a third too wide). 0 = fill the target.
     pub screen_aspect: f32,
+    /// How the 4:3 movie plane adapts to non-4:3 screens (Pillarbox by default for headless parity).
+    pub movie_presentation: MoviePresentation,
     /// Screen Adjust: the picture offset as fractions of the PS2 picture (`FrontEnd::screen_offset_frac`
     /// — X/2560 of the width, Y/448 of the height). The game moves the whole displayed frame by
     /// writing `PS2ScreenXPos`/`PS2ScreenYPos` into GS DISPLAY2's DX/DY in `VBlankInt` 0x124088:13-17 [M];
@@ -1045,7 +1047,7 @@ impl Renderer {
         // the port draws it as a textured quad through the HUD pipeline after everything else. The
         // texture + bind group are (re)built lazily in render() at the frame's size, so only the
         // static quad buffer and the shared layout/sampler are made here.
-        let movie_vbuf = dc(device, "gpu: create_buffer").create_buffer(&wgpu::BufferDescriptor { label: None, size: 12 * std::mem::size_of::<HudVertex>() as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let movie_vbuf = dc(device, "gpu: create_buffer").create_buffer(&wgpu::BufferDescriptor { label: None, size: 36 * std::mem::size_of::<HudVertex>() as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         wb(queue, &movie_vbuf, 0, bytemuck::cast_slice(&[
             // Row 0 of the frame at the top of the screen (NDC y up, uv v down — the HUD quad
             // convention, hud.rs quad()).
@@ -1066,7 +1068,7 @@ impl Renderer {
             for ch in &cel_graph.chains { for &c in ch { if (c as usize) < n { reached[c as usize] = true; } } }
             reached.iter().map(|r| !r).collect()
         };
-        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler: sampler, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
+        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, movie_presentation: MoviePresentation::Pillarbox, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler: sampler, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
     }
 
     /// The game's depth-0 pyramid for the walk [M `Vision_Calculate_View_Fustrum` 0x1e7df8,
@@ -1826,16 +1828,9 @@ impl Renderer {
                     self.movie_size = Some((w, h));
                 }
                 if let Some(tex) = &self.movie_tex {
-                    let sx = if self.screen_aspect > 0.0 { ((4.0 / 3.0) / self.screen_aspect).min(1.0) } else { 1.0 };
-                    let v = |x: f32, y: f32, u: f32, w: f32| HudVertex { p: [x * sx, y], uv: [u, w], c: [1.0; 4] };
-                    // The picture outside the 4:3 movie is black, as on the console, where nothing
-                    // else is drawn while a movie plays: an opaque full-target quad first, so the
-                    // 3-D frame under it (the mission's last frame at an outro) never shows at the sides.
-                    let k = |x: f32, y: f32| HudVertex { p: [x, y], uv: [-1.0, -1.0], c: [0.0, 0.0, 0.0, 1.0] };
-                    wb(queue, &self.movie_vbuf, 0, bytemuck::cast_slice(&[
-                        k(-1.0, 1.0), k(1.0, 1.0), k(1.0, -1.0), k(-1.0, 1.0), k(1.0, -1.0), k(-1.0, -1.0),
-                        v(-1.0, 1.0, 0.0, 0.0), v(1.0, 1.0, 1.0, 0.0), v(1.0, -1.0, 1.0, 1.0),
-                        v(-1.0, 1.0, 0.0, 0.0), v(1.0, -1.0, 1.0, 1.0), v(-1.0, -1.0, 0.0, 1.0)]));
+                    let verts = movie_quad_verts(self.screen_aspect, self.movie_presentation);
+                    let vcount = verts.len() as u32;
+                    wb(queue, &self.movie_vbuf, 0, bytemuck::cast_slice(&verts));
                     wt(queue, 
                         wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                         rgba, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
@@ -1843,7 +1838,7 @@ impl Renderer {
                     pass.set_pipeline(&self.hud_pipeline);
                     pass.set_bind_group(0, self.movie_bg.as_ref().unwrap(), &[]);
                     pass.set_vertex_buffer(0, self.movie_vbuf.slice(..));
-                    pass.draw(0..12, 0..1);
+                    pass.draw(0..vcount, 0..1);
                 }
             }
             if n > 0 {
@@ -1972,8 +1967,125 @@ mod tests {
     }
 }
 
+/// How the 4:3 movie plane (FMVs and looping FrontEnd menu backdrops) adapts to non-4:3 displays
+/// without stretching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MoviePresentation {
+    /// Classic 4:3 fit with black bars (console parity; default for headless tests).
+    #[default]
+    Pillarbox,
+    /// Full 4:3 frame kept 100% crisp, uncropped, and unstretched in the center; dead black wings
+    /// on widescreen/ultrawide are replaced with a soft darkened ambient bleed from the movie edges.
+    Ambient,
+    /// Aspect-preserving uniform scale (up to 1.35x) to fill 16:10 / 16:9 edge-to-edge without
+    /// stretching, smoothly falling back to ambient wings on 21:9 / 32:9 ultrawides.
+    Cover,
+}
+
+/// Resolve the display-agnostic movie presentation mode.
+/// Honors `NF_MOVIE_MODE=pillarbox|ambient|cover`; defaults to `Cover` for looping menu backdrops
+/// and `Ambient` for narrative FMVs (zero stretching in all modes).
+pub fn adaptive_movie_mode(is_menu_backdrop: bool) -> MoviePresentation {
+    match std::env::var("NF_MOVIE_MODE").ok().as_deref() {
+        Some("pillarbox") | Some("4:3") => MoviePresentation::Pillarbox,
+        Some("ambient") => MoviePresentation::Ambient,
+        Some("cover") => MoviePresentation::Cover,
+        _ if is_menu_backdrop => MoviePresentation::Cover,
+        _ => MoviePresentation::Ambient,
+    }
+}
+
+/// Build the non-stretching vertex list for the movie plane at `screen_aspect` (w / h).
+/// Always preserves the movie's 4:3 pixel aspect ratio (never stretches horizontally or vertically).
+pub fn movie_quad_verts(screen_aspect: f32, mode: MoviePresentation) -> Vec<HudVertex> {
+    let mut verts = Vec::with_capacity(24);
+    let k = |x: f32, y: f32| HudVertex { p: [x, y], uv: [-1.0, -1.0], c: [0.0, 0.0, 0.0, 1.0] };
+    // Full-target opaque black clear quad first so 3D frames underneath never leak through.
+    verts.extend_from_slice(&[
+        k(-1.0, 1.0), k(1.0, 1.0), k(1.0, -1.0),
+        k(-1.0, 1.0), k(1.0, -1.0), k(-1.0, -1.0),
+    ]);
+
+    let movie_aspect = 4.0 / 3.0;
+    let aspect = if screen_aspect > 0.0 { screen_aspect } else { movie_aspect };
+    let fit_sx = (movie_aspect / aspect).min(1.0);
+    let fit_sy = (aspect / movie_aspect).min(1.0);
+
+    // Center quad dimensions & UVs (always 1:1 pixel aspect, zero stretching).
+    let (cx, cy, u0, u1, v0, v1) = match mode {
+        MoviePresentation::Cover if aspect > movie_aspect + 0.01 => {
+            // Uniformly scale up to 1.35x so 16:10 (1.20x) and 16:9 (1.333x) fill edge-to-edge
+            // cleanly without over-cropping 21:9 / 32:9 ultrawides.
+            let zoom = (aspect / movie_aspect).min(1.35);
+            let sx = (fit_sx * zoom).min(1.0);
+            let crop_v = (1.0 - 1.0 / zoom) * 0.5;
+            (sx, 1.0, 0.0, 1.0, crop_v, 1.0 - crop_v)
+        }
+        _ => (fit_sx, fit_sy, 0.0, 1.0, 0.0, 1.0),
+    };
+
+    // Ambient wings for widescreen / ultrawide when space remains outside the unstretched picture.
+    if mode != MoviePresentation::Pillarbox && cx < 0.995 {
+        let outer = [0.07, 0.07, 0.09, 1.0];
+        let inner = [0.24, 0.24, 0.28, 1.0];
+        let vl = |x: f32, y: f32, u: f32, v: f32, c: [f32; 4]| HudVertex { p: [x, y], uv: [u, v], c };
+        // Left wing: bleeds the left 18% of the frame softly to the left screen edge.
+        verts.extend_from_slice(&[
+            vl(-1.0, cy, 0.18, v0, outer), vl(-cx, cy, 0.0, v0, inner), vl(-cx, -cy, 0.0, v1, inner),
+            vl(-1.0, cy, 0.18, v0, outer), vl(-cx, -cy, 0.0, v1, inner), vl(-1.0, -cy, 0.18, v1, outer),
+        ]);
+        // Right wing: bleeds the right 18% of the frame softly to the right screen edge.
+        verts.extend_from_slice(&[
+            vl(cx, cy, 1.0, v0, inner), vl(1.0, cy, 0.82, v0, outer), vl(1.0, -cy, 0.82, v1, outer),
+            vl(cx, cy, 1.0, v0, inner), vl(1.0, -cy, 0.82, v1, outer), vl(cx, -cy, 1.0, v1, inner),
+        ]);
+    }
+
+    // Crisp, unstretched center picture.
+    let v = |x: f32, y: f32, u: f32, vv: f32| HudVertex { p: [x, y], uv: [u, vv], c: [1.0; 4] };
+    verts.extend_from_slice(&[
+        v(-cx, cy, u0, v0), v(cx, cy, u1, v0), v(cx, -cy, u1, v1),
+        v(-cx, cy, u0, v0), v(cx, -cy, u1, v1), v(-cx, -cy, u0, v1),
+    ]);
+    verts
+}
+
 #[cfg(test)]
 mod shader_tests {
+    /// Adaptive movie framing must never stretch pixels on any display aspect (portrait, 4:3,
+    /// 16:10, 16:9, 21:9, 32:9). Sister: `Ambient` adds wings on widescreen whereas `Pillarbox`
+    /// keeps only the black clear + centered quad.
+    #[test]
+    fn adaptive_movie_preserves_pixel_aspect_without_stretching() {
+        use super::{movie_quad_verts, MoviePresentation};
+        for aspect in [9.0 / 16.0, 4.0 / 3.0, 16.0 / 10.0, 16.0 / 9.0, 21.0 / 9.0, 32.0 / 9.0] {
+            for mode in [MoviePresentation::Pillarbox, MoviePresentation::Ambient, MoviePresentation::Cover] {
+                let verts = movie_quad_verts(aspect, mode);
+                assert!(verts.len() == 12 || verts.len() == 24, "unexpected vertex count {}", verts.len());
+                // Last 6 vertices are the primary crisp center quad.
+                let q = &verts[verts.len() - 6..];
+                let ndc_w = (q[1].p[0] - q[0].p[0]).abs();
+                let ndc_h = (q[0].p[1] - q[2].p[1]).abs();
+                let uv_w = (q[1].uv[0] - q[0].uv[0]).abs();
+                let uv_h = (q[2].uv[1] - q[0].uv[1]).abs();
+                // Displayed screen aspect of the sampled UV region must equal (4/3) * (uv_w / uv_h).
+                let displayed_aspect = (ndc_w * aspect) / ndc_h;
+                let source_aspect = (4.0 / 3.0) * (uv_w / uv_h);
+                assert!(
+                    (displayed_aspect - source_aspect).abs() < 1e-3,
+                    "stretched at aspect={aspect:.3} mode={mode:?}: displayed={displayed_aspect:.4} vs source={source_aspect:.4}"
+                );
+            }
+        }
+        // Sister assertions: Ambient emits ambient wings on 21:9 (24 verts) vs Pillarbox (12 verts);
+        // Cover fills 16:9 edge-to-edge (12 verts, cx=1.0) and adds wings on 21:9 (24 verts).
+        assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Pillarbox).len(), 12);
+        assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Ambient).len(), 24);
+        let cover_16_9 = movie_quad_verts(16.0 / 9.0, MoviePresentation::Cover);
+        assert_eq!(cover_16_9.len(), 12);
+        assert!((cover_16_9[7].p[0] - 1.0).abs() < 1e-3, "16:9 Cover fills width cleanly");
+        assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Cover).len(), 24);
+    }
     /// The WGSL must parse and validate offline (no GPU adapter needed). fix-lighting touched the main shader's uniform struct and
     /// light block — a syntax or validation error would break every draw at Renderer::new.
     #[test]

@@ -4189,6 +4189,7 @@ impl App {
         };
         let view = frame.texture.create_view(&Default::default());
         g.renderer.screen_aspect = aspect;
+        g.renderer.movie_presentation = gpu::adaptive_movie_mode(false);
         g.renderer.screen_offset = screen_frac(self.fe.as_ref().map_or(self.screen_pos, |f| (f.screen_x, f.screen_y)));
         // A zero view-projection collapses every world vertex (w = 0), so only the picture and the overlay draw.
         let id = [[0.0f32; 4]; 4];
@@ -6890,6 +6891,8 @@ impl App {
                 }
                 g.renderer.lights = self.scene.frame_lights();
                 g.renderer.screen_aspect = g.config.width as f32 / g.config.height.max(1) as f32;
+                let is_menu_backdrop = self.fe.as_ref().is_some_and(|fe| !fe.intro_playing && fe.flow.get_state() != menu::ST_MOVIE);
+                g.renderer.movie_presentation = gpu::adaptive_movie_mode(is_menu_backdrop);
                 // Screen Adjust: the whole frame shifts by the live offset (gpu::screen_adjust_viewport).
                 if let Some(fe) = self.fe.as_ref() { self.screen_pos = (fe.screen_x, fe.screen_y); }
                 g.renderer.screen_offset = screen_frac(self.screen_pos);

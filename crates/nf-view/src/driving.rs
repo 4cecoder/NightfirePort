@@ -823,12 +823,13 @@ impl DrivingState {
         let out = h.draw.frame(&h.layout, &input, nf_game::driving_hud_draw::HudStrings { font: &h.font, loc: &h.loc });
         let eff_aspect = aspect.max(4.0 / 3.0);
         let s = 2.0 / 640.0 * (4.0 / 3.0) / eff_aspect;
+        let edge_x = crate::hud::hud_edge_x(aspect);
         let sy = if aspect < 4.0 / 3.0 { (aspect / (4.0 / 3.0)).max(0.25) } else { 1.0 };
         let ndc_anchored = |x: f32, y: f32, cx: f32| {
             let nx = if cx < 213.0 {
-                -1.0 + x * s
+                -edge_x + x * s
             } else if cx > 427.0 {
-                1.0 - (640.0 - x) * s
+                edge_x - (640.0 - x) * s
             } else {
                 (x - 320.0) * s
             };

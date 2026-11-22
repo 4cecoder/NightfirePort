@@ -236,6 +236,25 @@ fn gs(rgb: u32, a: u32) -> [f32; 4] {
     [((rgb >> 16) & 0xff) as f32 / 128.0, ((rgb >> 8) & 0xff) as f32 / 128.0, (rgb & 0xff) as f32 / 128.0, ((a.min(255) >> 1) as f32 / 128.0).min(1.0)]
 }
 
+/// Ultrawide HUD safe-zone cap: on displays wider than 16:9 (21:9, 32:9), left/right anchored
+/// HUD panes stay within the central 16:9 ergonomic zone instead of flying out to the extreme
+/// periphery, while `Anchor::Stretch` (fades, letterbox, goggles, damage glow) still covers 100%.
+/// Override via `NF_HUD_MAX_ASPECT` (e.g. `2.333`, or `0` to anchor to the raw edges).
+pub fn hud_edge_x(aspect: f32) -> f32 {
+    static MAX_ASPECT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    let cap = *MAX_ASPECT.get_or_init(|| {
+        std::env::var("NF_HUD_MAX_ASPECT")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(16.0 / 9.0)
+    });
+    if cap > 0.0 && aspect > cap {
+        (cap / aspect).clamp(0.4, 1.0)
+    } else {
+        1.0
+    }
+}
+
 impl Hud<'_> {
     /// A texture's pixel size (for the w/h-0 "texture size" sprites). (0, 0) when not loaded.
     pub(crate) fn tex_dims(&self, tex: u32) -> (f32, f32) {
@@ -247,14 +266,15 @@ impl Hud<'_> {
         // on windows narrower than 4:3, scale uniformly so edges never clip off screen.
         let eff = self.aspect.max(4.0 / 3.0);
         let s = 2.0 / SW * (4.0 / 3.0) / eff;
+        let edge_x = hud_edge_x(self.aspect);
         let sy = if self.aspect < 4.0 / 3.0 && !matches!(anchor, Anchor::Stretch) {
             (self.aspect / (4.0 / 3.0)).max(0.25)
         } else {
             1.0
         };
         let nx = match anchor {
-            Anchor::Left => -1.0 + x * s,
-            Anchor::Right => 1.0 - (SW - x) * s,
+            Anchor::Left => -edge_x + x * s,
+            Anchor::Right => edge_x - (SW - x) * s,
             Anchor::Centre => (x - SW / 2.0) * s,
             Anchor::Stretch => x / SW * 2.0 - 1.0,
         };

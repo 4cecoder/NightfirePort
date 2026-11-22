@@ -689,6 +689,8 @@ impl MacEngine {
         m.renderer.set_char_light_centres(&self.scene);
         m.renderer.lights = self.scene.frame_lights();
         m.renderer.screen_aspect = aspect;
+        let is_menu_backdrop = self.fe.as_ref().is_some_and(|fe| !fe.intro_playing && fe.flow.get_state() != nf_view::menu::ST_MOVIE);
+        m.renderer.movie_presentation = nf_view::gpu::adaptive_movie_mode(is_menu_backdrop);
         m.renderer.set_shards(&m.queue, &self.scene.shard_draws());
         m.renderer
             .set_particles(&m.queue, &particles_for(&self.scene, &cam));
@@ -960,6 +962,8 @@ impl MacEngine {
             m.renderer.set_char_light_centres(&self.scene);
             m.renderer.lights = self.scene.frame_lights();
             m.renderer.screen_aspect = aspect;
+        let is_menu_backdrop = self.fe.as_ref().is_some_and(|fe| !fe.intro_playing && fe.flow.get_state() != nf_view::menu::ST_MOVIE);
+        m.renderer.movie_presentation = nf_view::gpu::adaptive_movie_mode(is_menu_backdrop);
             m.renderer.set_shards(&m.queue, &self.scene.shard_draws());
             m.renderer
                 .set_particles(&m.queue, &particles_for(&self.scene, &cam));
