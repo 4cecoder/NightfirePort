@@ -1210,7 +1210,9 @@ mod android_impl {
                 }
             })
         };
-        let hud = if let Some(drv) = app.driving.as_mut() {
+        let hud = if suppress_menu_hud {
+            HudFrame::default()
+        } else if let Some(drv) = app.driving.as_mut() {
             drv.hud_frame(&app.scene, aspect)
         } else {
             shot_hud(&app.scene, aspect, menu_hud.as_ref(), false)
