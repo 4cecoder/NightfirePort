@@ -2328,9 +2328,9 @@ pub fn movie_quad_verts_cropped(screen_aspect: f32, mode: MoviePresentation, let
     // Center quad dimensions & UVs (always 1:1 pixel aspect, zero stretching).
     let (cx, cy, u0, u1, v0, v1) = match mode {
         MoviePresentation::Cover if aspect > content_aspect + 0.01 => {
-            // Uniformly scale up to 1.35x so 16:10 and 16:9 fill edge-to-edge without over-cropping
-            // 21:9 / 32:9 ultrawides.
-            let zoom = (aspect / content_aspect).min(1.35);
+            // Uniformly scale up to 1.75x so 16:10, 16:9, and 20:9/21:9 phone & ultrawide screens
+            // fill edge-to-edge with zero stretching, falling back to ambient wings only on 32:9.
+            let zoom = (aspect / content_aspect).min(1.75);
             let sx = (fit_sx * zoom).min(1.0);
             let extra_v = active_v * (1.0 - 1.0 / zoom) * 0.5;
             (sx, 1.0, 0.0, 1.0, lb + extra_v, 1.0 - lb - extra_v)
@@ -2467,13 +2467,14 @@ mod shader_tests {
             }
         }
         // Sister assertions: Ambient emits ambient wings on 21:9 (24 verts) vs Pillarbox (12 verts);
-        // Cover fills 16:9 edge-to-edge (12 verts, cx=1.0) and adds wings on 21:9 (24 verts).
+        // Cover fills 16:9 and 20:9/21:9 edge-to-edge (12 verts, cx=1.0) and adds wings on 32:9 (24 verts).
         assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Pillarbox).len(), 12);
         assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Ambient).len(), 24);
         let cover_16_9 = movie_quad_verts(16.0 / 9.0, MoviePresentation::Cover);
         assert_eq!(cover_16_9.len(), 12);
         assert!((cover_16_9[7].p[0] - 1.0).abs() < 1e-3, "16:9 Cover fills width cleanly");
-        assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Cover).len(), 24);
+        assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Cover).len(), 12);
+        assert_eq!(movie_quad_verts(32.0 / 9.0, MoviePresentation::Cover).len(), 24);
     }
     /// Letterbox detection finds baked 16:9 cinema bars inside 512x448 frames, returns 0.0 for
     /// full-frame 4:3 frames, and returns None on solid-black fade frames (sister checks).

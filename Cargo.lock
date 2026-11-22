@@ -1056,6 +1056,7 @@ dependencies = [
  "glam",
  "jni 0.21.1",
  "log",
+ "ndk-context",
  "ndk-sys",
  "nf-audio",
  "nf-formats",
