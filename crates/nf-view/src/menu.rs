@@ -11306,6 +11306,12 @@ pub const PC_DRIVING_CONTROLS: [(&str, u32, &str); 13] = [
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeyCap { Text(&'static str), UpDown, LeftRight }
 pub fn pc_key(token: char) -> Option<KeyCap> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = token;
+        return None;
+    }
+    #[cfg(not(target_os = "android"))]
     Some(match token {
         'A' => KeyCap::Text("Enter"),     // ✕ — Action::Confirm (Enter / Space)
         'B' => KeyCap::Text("Esc"),       // △ — Action::Back (Esc / Backspace)

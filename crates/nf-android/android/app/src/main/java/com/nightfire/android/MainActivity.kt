@@ -318,18 +318,22 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    color = Color(0xAA0D1117),
-                    shape = RoundedCornerShape(12.dp),
-                    tonalElevation = 2.dp
-                ) {
-                    Text(
-                        text = statusText,
-                        color = Color(0xFFE6EDF3),
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                    )
+                if (!inMenu) {
+                    Surface(
+                        color = Color(0xAA0D1117),
+                        shape = RoundedCornerShape(12.dp),
+                        tonalElevation = 2.dp
+                    ) {
+                        Text(
+                            text = statusText,
+                            color = Color(0xFFE6EDF3),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                } else {
+                    Spacer(modifier = Modifier.width(1.dp))
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -416,7 +420,7 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
         Box(
             modifier = modifier
                 .safeDrawingPadding()
-                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .padding(start = 22.dp, end = 22.dp, top = 12.dp, bottom = 18.dp)
         ) {
             // Bottom-Left compact ergonomic cross D-Pad
             Box(
@@ -478,7 +482,7 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
                 Ps2FaceBtn(
                     kind = "cross",
                     caption = "Select",
-                    accent = Color(0xFFD4AF37),
+                    accent = Color(0xFF60A5FA),
                     primary = true,
                     modifier = Modifier.align(Alignment.BottomCenter)
                 ) {

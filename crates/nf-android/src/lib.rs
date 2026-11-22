@@ -339,7 +339,16 @@ mod android_impl {
                     last_frame: Instant::now(),
                     accum_secs: 0.0,
                     ticks: 0,
-                    live_bridge: nf_view::live_bridge::LiveBridge::bind(9878).ok(),
+                    live_bridge: match nf_view::live_bridge::LiveBridge::bind(9878) {
+                        Ok(b) => {
+                            log::info!("LiveBridge listening on 127.0.0.1:{}", b.port());
+                            Some(b)
+                        }
+                        Err(e) => {
+                            log::warn!("LiveBridge bind(9878) failed: {e}");
+                            None
+                        }
+                    },
                     movie: None,
                     movie_failed: None,
                 };
@@ -774,7 +783,14 @@ mod android_impl {
         let actions: Vec<MenuAction> = app.input.pending_menu_actions.drain(..).collect();
         if let Some(fe) = app.fe.as_mut() {
             for a in actions {
-                fe.action(a);
+                if fe.flow.get_state() == menu::ST_MOVIE {
+                    if matches!(a, MenuAction::Confirm | MenuAction::Back | MenuAction::Down) {
+                        app.movie = None;
+                        fe.flow.pop_state();
+                    }
+                } else {
+                    fe.action(a);
+                }
             }
         }
 
@@ -789,6 +805,8 @@ mod android_impl {
                 fe.tick();
                 if let Some(req) = fe.requested_level.take() {
                     pending_level = Some(format!("{req:08x}.bin"));
+                } else if let Some(drv_code) = fe.launching_driving() {
+                    pending_level = Some(format!("{drv_code:08x}.bin"));
                 }
             }
 
@@ -1042,35 +1060,12 @@ mod android_impl {
         gfx.renderer.sky_spin = app.scene.sim.as_ref().map_or(0.0, |s| s.drones.sky.spin());
         gfx.renderer.set_shards(&gfx.queue, &app.scene.shard_draws());
 
-        let snow = nf_view::snow_for(&app.scene, &app.cam);
-        let menu_hud: Option<HudFrame> = app.fe.as_mut().map(|fe| {
-            let lang = app
-                .lang
-                .as_ref()
-                .or_else(|| app.scene.sim.as_ref().and_then(|s| s.lang.as_ref()));
-            fe.view_h = gfx.config.height as f32;
-            match &app.scene.hud {
-                Some(tables) => menu::menu_overlay_fonts(
-                    fe,
-                    &tables.font,
-                    &tables.font_header,
-                    Some(&tables.font_medium),
-                    lang,
-                    &app.scene.hud_textures,
-                    aspect,
-                ),
-                None => overlay_for(&app.scene, aspect),
-            }
-        });
-        let hud = if let Some(drv) = app.driving.as_mut() {
-            drv.hud_frame(&app.scene, aspect)
-        } else {
-            shot_hud(&app.scene, aspect, menu_hud.as_ref(), false)
-        };
-
-        // Step FrontEnd / intro / briefing MPEG-2 movie player (1:1 with desktop nf-view)
+        // Step FrontEnd / intro / briefing MPEG-2 movie player BEFORE building menu_hud
+        // so `fe.intro_live` and `fe.backdrop_live` accurately hide the fallback plate.
         let mut movie_frame_owned: Option<(u32, u32, Vec<u8>)> = None;
         if let Some(fe) = app.fe.as_mut() {
+            fe.intro_live = false;
+            fe.backdrop_live = false;
             let vol = 100u32;
             if fe.intro_movie {
                 let code = fe.intro_movie_code();
@@ -1079,10 +1074,12 @@ mod android_impl {
                 if need_start {
                     match nf_view::movie::Player::start(&app.data_path, code, vol) {
                         Ok(p) => {
+                            log::info!("movie: started intro 0x{code:08x}");
                             app.movie = Some(p);
                             app.movie_failed = None;
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            log::warn!("movie: intro 0x{code:08x} unavailable: {e:?}");
                             app.movie = None;
                             app.movie_failed = Some(code);
                             fe.intro_movie_finished();
@@ -1092,12 +1089,11 @@ mod android_impl {
                 if let Some(p) = app.movie.as_mut() {
                     if let Some((w, h, rgba)) = p.present() {
                         movie_frame_owned = Some((w, h, rgba.to_vec()));
+                        fe.intro_live = true;
                     }
                     if p.finished() {
                         app.movie = None;
                         fe.intro_movie_finished();
-                    } else {
-                        fe.intro_live = true;
                     }
                 }
             } else if fe.flow.get_state() == menu::ST_MOVIE {
@@ -1107,10 +1103,12 @@ mod android_impl {
                 if need_start {
                     match nf_view::movie::Player::start(&app.data_path, code, vol) {
                         Ok(p) => {
+                            log::info!("movie: started briefing/cutscene 0x{code:08x}");
                             app.movie = Some(p);
                             app.movie_failed = None;
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            log::warn!("movie: 0x{code:08x} unavailable: {e:?}");
                             app.movie = None;
                             app.movie_failed = Some(code);
                             fe.flow.pop_state();
@@ -1134,10 +1132,12 @@ mod android_impl {
                     if need_start {
                         match nf_view::movie::Player::start_looping(&app.data_path, aux, vol) {
                             Ok(p) => {
+                                log::info!("movie: started looping backdrop 0x{aux:08x}");
                                 app.movie = Some(p);
                                 app.movie_failed = None;
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                log::warn!("movie: backdrop 0x{aux:08x} unavailable: {e:?}");
                                 app.movie = None;
                                 app.movie_failed = Some(aux);
                             }
@@ -1146,6 +1146,7 @@ mod android_impl {
                     if let Some(p) = app.movie.as_mut() {
                         if let Some((w, h, rgba)) = p.present() {
                             movie_frame_owned = Some((w, h, rgba.to_vec()));
+                            fe.backdrop_live = true;
                         }
                     }
                 } else {
@@ -1156,6 +1157,37 @@ mod android_impl {
             app.movie = None;
         }
         let movie_arg = movie_frame_owned.as_ref().map(|(w, h, r)| (*w, *h, r.as_slice()));
+
+        let snow = nf_view::snow_for(&app.scene, &app.cam);
+        let suppress_menu_hud = app.fe.as_ref().is_some_and(|fe| fe.intro_live || fe.flow.get_state() == menu::ST_MOVIE);
+        let menu_hud: Option<HudFrame> = if suppress_menu_hud {
+            None
+        } else {
+            app.fe.as_mut().map(|fe| {
+                let lang = app
+                    .lang
+                    .as_ref()
+                    .or_else(|| app.scene.sim.as_ref().and_then(|s| s.lang.as_ref()));
+                fe.view_h = gfx.config.height as f32;
+                match &app.scene.hud {
+                    Some(tables) => menu::menu_overlay_fonts(
+                        fe,
+                        &tables.font,
+                        &tables.font_header,
+                        Some(&tables.font_medium),
+                        lang,
+                        &app.scene.hud_textures,
+                        aspect,
+                    ),
+                    None => overlay_for(&app.scene, aspect),
+                }
+            })
+        };
+        let hud = if let Some(drv) = app.driving.as_mut() {
+            drv.hud_frame(&app.scene, aspect)
+        } else {
+            shot_hud(&app.scene, aspect, menu_hud.as_ref(), false)
+        };
 
         let render_t0 = Instant::now();
         let enc = gfx.renderer.render(
