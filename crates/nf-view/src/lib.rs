@@ -6541,8 +6541,8 @@ impl App {
                 } else if let Some(drv) = self.driving.as_mut() {
                     let throttle = if self.keys.contains(&KeyCode::KeyW) || self.keys.contains(&KeyCode::ArrowUp) { 1.0 } else { 0.0 };
                     let brake = if self.keys.contains(&KeyCode::KeyS) || self.keys.contains(&KeyCode::ArrowDown) { 1.0 } else { 0.0 };
-                    let steer = if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { -1.0 } else { 0.0 }
-                        + if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 };
+                    let steer = if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { 1.0 } else { 0.0 }
+                        - if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 };
                     let handbrake = self.keys.contains(&KeyCode::Space);
                     // Weapons: Ctrl fires the selected weapon, Q cycles it (the shipped pad binds R1 /
                     // d-pad; the keys are the port's) [controls doc: driving-input.md].

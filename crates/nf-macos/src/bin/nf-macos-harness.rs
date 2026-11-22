@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use nf_view::menu::Action as MenuAction;
+use nfmacos::controls::{parse_key, verify_controls, VirtualKbm};
 use nfmacos::engine::{
     discover_levels, InputState, LoadOptions, MacEngine, BTN_AIM, BTN_CROUCH, BTN_FIRE, BTN_JUMP,
     BTN_PAUSE, BTN_RELOAD, BTN_USE, BTN_WEAP_NEXT, BTN_WEAP_PREV,
@@ -48,6 +49,7 @@ struct Cli {
     json: bool,
     list_levels: bool,
     repl: bool,
+    verify_controls: bool,
 }
 
 fn parse_size(s: &str) -> Result<(u32, u32)> {
@@ -83,6 +85,7 @@ fn print_help() {
            --audio                Enable live CoreAudio output\n\
            --json                 Emit NDJSON telemetry lines\n\
            --list-levels          Discover and print all levels from ISO or carved dir\n\
+           --verify-controls      Verify all keyboard/mouse/directional mappings (FE, On-Foot, Driving)\n\
            --repl                 Interactive persistent Metal control REPL (stdin -> JSON stdout)\n\
            --help                 Show this help"
     );
@@ -111,6 +114,7 @@ fn parse_args() -> Result<Option<Cli>> {
     let mut json = false;
     let mut list_levels = false;
     let mut repl = false;
+    let mut verify_ctrls = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -160,6 +164,7 @@ fn parse_args() -> Result<Option<Cli>> {
             "--audio" => audio = true,
             "--json" => json = true,
             "--list-levels" => list_levels = true,
+            "--verify-controls" => verify_ctrls = true,
             "--repl" => repl = true,
             _ if a.starts_with("--") => anyhow::bail!("unknown flag: {a} (try --help)"),
             _ => positional.push(a.to_string()),
@@ -194,6 +199,7 @@ fn parse_args() -> Result<Option<Cli>> {
         json,
         list_levels,
         repl,
+        verify_controls: verify_ctrls,
     }))
 }
 
@@ -333,6 +339,7 @@ fn default_cases(difficulty: u32) -> Vec<SuiteCase> {
 
 fn run_repl(engine: &mut MacEngine, cli: &Cli) -> Result<()> {
     let mut stdout = io::stdout().lock();
+    let mut kbm = VirtualKbm::default();
     if let Some(ref archive) = cli.level {
         engine.load_level_with(
             archive,
@@ -536,6 +543,76 @@ fn run_repl(engine: &mut MacEngine, cli: &Cli) -> Result<()> {
                 let sent = engine.skip_cutscene();
                 Ok(format!("{{\"ok\":true,\"skip_sent\":{sent}}}"))
             }
+            "key_down" => (|| -> Result<String> {
+                let k = parse_key(parts.get(1).copied().ok_or_else(|| anyhow!("key_down <key>"))?)?;
+                if engine.is_in_menu() {
+                    if let Some(act) = nf_view::menu::key_action(k) {
+                        engine.menu_action(act);
+                    }
+                }
+                kbm.key_down(k);
+                let inp = kbm.to_input_state(engine.driving.is_some());
+                engine.set_input(inp);
+                Ok(format!("{{\"ok\":true,\"key_down\":\"{k:?}\"}}"))
+            })(),
+            "key_up" => (|| -> Result<String> {
+                let k = parse_key(parts.get(1).copied().ok_or_else(|| anyhow!("key_up <key>"))?)?;
+                kbm.key_up(k);
+                let inp = kbm.to_input_state(engine.driving.is_some());
+                engine.set_input(inp);
+                Ok(format!("{{\"ok\":true,\"key_up\":\"{k:?}\"}}"))
+            })(),
+            "key_tap" => (|| -> Result<String> {
+                let k = parse_key(parts.get(1).copied().ok_or_else(|| anyhow!("key_tap <key> [ticks]"))?)?;
+                let n: u32 = parts.get(2).map(|s| s.parse()).transpose()?.unwrap_or(1);
+                if engine.is_in_menu() {
+                    if let Some(act) = nf_view::menu::key_action(k) {
+                        engine.menu_action(act);
+                    }
+                }
+                kbm.key_down(k);
+                for _ in 0..n {
+                    let inp = kbm.to_input_state(engine.driving.is_some());
+                    engine.set_input(inp);
+                    engine.step(1.0 / 60.0);
+                }
+                kbm.key_up(k);
+                let inp = kbm.to_input_state(engine.driving.is_some());
+                engine.set_input(inp);
+                Ok(format!("{{\"ok\":true,\"key_tap\":\"{k:?}\",\"ticks\":{n},\"telemetry\":{}}}", engine.telemetry().to_json()))
+            })(),
+            "mouse_move" => (|| -> Result<String> {
+                let dx: f64 = parts.get(1).ok_or_else(|| anyhow!("mouse_move <dx> <dy>"))?.parse()?;
+                let dy: f64 = parts.get(2).ok_or_else(|| anyhow!("mouse_move <dx> <dy>"))?.parse()?;
+                kbm.mouse_move(dx, dy, 1.0);
+                let inp = kbm.to_input_state(engine.driving.is_some());
+                engine.set_input(inp);
+                Ok(format!("{{\"ok\":true,\"mouse_move\":[{dx:.2},{dy:.2}]}}"))
+            })(),
+            "mouse_btn" => (|| -> Result<String> {
+                let btn = parts.get(1).copied().ok_or_else(|| anyhow!("mouse_btn <left|right> <down|up>"))?;
+                let down = matches!(parts.get(2).copied(), Some("down" | "1" | "true"));
+                match btn {
+                    "left" => kbm.mouse_left = down,
+                    "right" => kbm.mouse_right = down,
+                    other => anyhow::bail!("unknown mouse button: {other}"),
+                }
+                let inp = kbm.to_input_state(engine.driving.is_some());
+                engine.set_input(inp);
+                Ok(format!("{{\"ok\":true,\"mouse_btn\":\"{btn}\",\"down\":{down}}}"))
+            })(),
+            "keys_reset" => {
+                kbm.reset();
+                engine.set_input(InputState::default());
+                Ok("{\"ok\":true,\"keys_reset\":true}".to_string())
+            }
+            "verify_controls" => (|| -> Result<String> {
+                let checks = verify_controls(engine)?;
+                let passed = checks.iter().filter(|c| c.passed).count();
+                let total = checks.len();
+                let items: Vec<String> = checks.iter().map(|c| c.to_json()).collect();
+                Ok(format!("{{\"ok\":{},\"passed\":{passed},\"total\":{total},\"checks\":[{}]}}", passed == total, items.join(",")))
+            })(),
             _ => Err(anyhow!("unknown command: {cmd}")),
         };
         match resp {
@@ -565,6 +642,28 @@ fn main() -> Result<()> {
     }
 
     let mut engine = MacEngine::init_with_audio(&cli.data_path, cli.audio)?;
+    if cli.verify_controls {
+        let checks = verify_controls(&mut engine)?;
+        let mut failed = 0usize;
+        for c in &checks {
+            if !c.passed {
+                failed += 1;
+            }
+            if cli.json {
+                println!("{}", c.to_json());
+            } else {
+                let tag = if c.passed { "PASS" } else { "FAIL" };
+                println!("[{tag}] {:8} {:46} ({})", c.mode, c.name, c.detail);
+            }
+        }
+        if failed > 0 {
+            anyhow::bail!("{failed}/{} control mapping check(s) failed", checks.len());
+        }
+        if !cli.json {
+            println!("[nf-macos-harness] all {}/{} control mapping checks PASSED", checks.len(), checks.len());
+        }
+        return Ok(());
+    }
     if cli.repl {
         return run_repl(&mut engine, &cli);
     }

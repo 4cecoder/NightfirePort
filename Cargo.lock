@@ -1114,6 +1114,7 @@ dependencies = [
  "nf-view",
  "pollster",
  "wgpu",
+ "winit",
 ]
 
 [[package]]

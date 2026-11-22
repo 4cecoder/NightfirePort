@@ -454,7 +454,7 @@ impl MacEngine {
         } else if let Some(drv) = self.driving.as_mut() {
             let throttle = self.input.move_y.max(0.0).clamp(0.0, 1.0);
             let brake = (-self.input.move_y).max(0.0).clamp(0.0, 1.0);
-            let steer = self.input.move_x.clamp(-1.0, 1.0);
+            let steer = -self.input.move_x.clamp(-1.0, 1.0);
             let handbrake = (self.input.buttons & BTN_JUMP) != 0;
             if let Some(w) = drv.weapons.as_mut() {
                 w.fire |= (self.input.buttons & BTN_FIRE) != 0;
