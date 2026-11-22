@@ -262,6 +262,67 @@ fn sample_smooth(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
 }
 "#;
 
+/// Dedicated system-agnostic video upscaler for 512x448 MPEG-2 `.PSS` movies:
+/// - 4-tap GPU-accelerated bicubic B-spline filter with subtle unsharp detail recovery (smooths
+///   MPEG-2 blockiness cleanly without `smoothstep` stair-stepping or ringing).
+/// - When `i.c.a < 0.99`, renders a soft 9-tap Gaussian-blurred ambient cinema glow for ultrawide
+///   wings instead of hard black bars or sharp mirrored artifacts.
+pub(crate) const MOVIE_SHADER: &str = r#"
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct MO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) c: vec4<f32> };
+@vertex fn vs(@location(0) p: vec2<f32>, @location(1) uv: vec2<f32>, @location(2) c: vec4<f32>) -> MO {
+    var o: MO;
+    o.p = vec4<f32>(p, 0.0, 1.0);
+    o.uv = uv;
+    o.c = c;
+    return o;
+}
+fn sample_bicubic(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
+    let dim = vec2<f32>(textureDimensions(t));
+    let texel = uv * dim - 0.5;
+    let base = floor(texel);
+    let f = texel - base;
+    let f2 = f * f;
+    let f3 = f2 * f;
+    // Cubic B-spline weights (C2 smooth, zero ringing on MPEG-2 video).
+    let w0 = (1.0 / 6.0) * (1.0 - 3.0 * f + 3.0 * f2 - f3);
+    let w1 = (1.0 / 6.0) * (4.0 - 6.0 * f2 + 3.0 * f3);
+    let w2 = (1.0 / 6.0) * (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3);
+    let w3 = (1.0 / 6.0) * f3;
+    let s0 = w0 + w1;
+    let s1 = w2 + w3;
+    let t0 = (base - 0.5 + w1 / s0) / dim;
+    let t1 = (base + 1.5 + w3 / s1) / dim;
+    let c00 = textureSampleLevel(t, s, vec2<f32>(t0.x, t0.y), 0.0);
+    let c10 = textureSampleLevel(t, s, vec2<f32>(t1.x, t0.y), 0.0);
+    let c01 = textureSampleLevel(t, s, vec2<f32>(t0.x, t1.y), 0.0);
+    let c11 = textureSampleLevel(t, s, vec2<f32>(t1.x, t1.y), 0.0);
+    let cubic = mix(mix(c11, c01, s0.x), mix(c10, c00, s0.x), s0.y);
+    let lin = textureSampleLevel(t, s, uv, 0.0);
+    // Subtle detail recovery (0.22) keeps film edges crisp while removing MPEG-2 blockiness.
+    return clamp(cubic + (lin - cubic) * 0.22, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+fn sample_ambient_blur(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
+    let r = vec2<f32>(0.045, 0.055);
+    var acc = textureSampleLevel(t, s, uv, 0.0) * 0.20;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>(-r.x, -r.y), 0.0) * 0.10;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>( r.x, -r.y), 0.0) * 0.10;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>(-r.x,  r.y), 0.0) * 0.10;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>( r.x,  r.y), 0.0) * 0.10;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>(-r.x * 2.0, 0.0), 0.0) * 0.10;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>( r.x * 2.0, 0.0), 0.0) * 0.10;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>(0.0, -r.y * 2.0), 0.0) * 0.10;
+    acc += textureSampleLevel(t, s, uv + vec2<f32>(0.0,  r.y * 2.0), 0.0) * 0.10;
+    return acc;
+}
+@fragment fn fs_movie(i: MO) -> @location(0) vec4<f32> {
+    if (i.uv.x < 0.0) { return vec4<f32>(i.c.rgb, 1.0); }
+    let col = select(sample_ambient_blur(tex, samp, i.uv), sample_bicubic(tex, samp, i.uv), i.c.a > 0.99);
+    return vec4<f32>(min(col.rgb * i.c.rgb * 1.1328125, vec3<f32>(1.0)), 1.0);
+}
+"#;
+
 /// One overlay vertex: NDC position (x right, y up) and RGBA (0–1).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -467,6 +528,9 @@ pub struct Renderer {
     /// and the intro draw through the same plane.
     hud_tbgl: wgpu::BindGroupLayout,
     hud_sampler: wgpu::Sampler,
+    movie_pipeline: wgpu::RenderPipeline,
+    movie_sampler: wgpu::Sampler,
+    movie_crop_v: f32,
     pipelines: Vec<(Draw, wgpu::RenderPipeline)>,
     /// Snow: the particle pipeline (additive, depth test, no write), a per-frame vertex buffer and the flake texture.
     snow_pipeline: wgpu::RenderPipeline,
@@ -849,6 +913,30 @@ impl Renderer {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
         }, "fs_ps2");
+        let movie_shader = dc(device, "gpu: create_shader_module").create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("nf-view movie"), source: wgpu::ShaderSource::Wgsl(MOVIE_SHADER.into()) });
+        let movie_pipeline = dc(device, "gpu: create_render_pipeline").create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("nf-view movie"),
+            layout: Some(&hud_layout),
+            vertex: wgpu::VertexState {
+                module: &movie_shader, entry_point: Some("vs"), compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<HudVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                })],
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(), bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &movie_shader, entry_point: Some("fs_movie"), compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None, cache: None,
+        });
         let hud_add_pipeline = make_hud(wgpu::BlendState {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
             alpha: hud_alpha,
@@ -896,6 +984,11 @@ impl Renderer {
         });
         let hud_sampler = dc(device, "gpu: create_sampler").create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat, address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let movie_sampler = dc(device, "gpu: create_sampler").create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
@@ -1103,7 +1196,7 @@ impl Renderer {
             for ch in &cel_graph.chains { for &c in ch { if (c as usize) < n { reached[c as usize] = true; } } }
             reached.iter().map(|r| !r).collect()
         };
-        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, movie_presentation: MoviePresentation::Pillarbox, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
+        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, movie_presentation: MoviePresentation::Pillarbox, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler, movie_pipeline, movie_sampler, movie_crop_v: 0.0, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
     }
 
     /// The game's depth-0 pyramid for the walk [M `Vision_Calculate_View_Fustrum` 0x1e7df8,
@@ -1857,24 +1950,38 @@ impl Renderer {
                     let view = t.create_view(&Default::default());
                     self.movie_bg = Some(dc(device, "gpu: create_bind_group").create_bind_group(&wgpu::BindGroupDescriptor {
                         label: None, layout: &self.hud_tbgl,
-                        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.hud_sampler) }],
+                        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.movie_sampler) }],
                     }));
                     self.movie_tex = Some(t);
                     self.movie_size = Some((w, h));
+                    self.movie_crop_v = 0.0;
+                }
+                if self.movie_presentation != MoviePresentation::Pillarbox {
+                    if let Some(detected) = detect_letterbox_v(w, h, rgba) {
+                        self.movie_crop_v = if self.movie_crop_v == 0.0 {
+                            detected
+                        } else {
+                            self.movie_crop_v * 0.85 + detected * 0.15
+                        };
+                    }
+                } else {
+                    self.movie_crop_v = 0.0;
                 }
                 if let Some(tex) = &self.movie_tex {
-                    let verts = movie_quad_verts(self.screen_aspect, self.movie_presentation);
+                    let verts = movie_quad_verts_cropped(self.screen_aspect, self.movie_presentation, self.movie_crop_v);
                     let vcount = verts.len() as u32;
                     wb(queue, &self.movie_vbuf, 0, bytemuck::cast_slice(&verts));
                     wt(queue, 
                         wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                         rgba, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
                         wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
-                    pass.set_pipeline(&self.hud_pipeline);
+                    pass.set_pipeline(&self.movie_pipeline);
                     pass.set_bind_group(0, self.movie_bg.as_ref().unwrap(), &[]);
                     pass.set_vertex_buffer(0, self.movie_vbuf.slice(..));
                     pass.draw(0..vcount, 0..1);
                 }
+            } else {
+                self.movie_crop_v = 0.0;
             }
             if n > 0 {
                 pass.set_vertex_buffer(0, self.hud_vbuf.slice(..));
@@ -2030,9 +2137,62 @@ pub fn adaptive_movie_mode(is_menu_backdrop: bool) -> MoviePresentation {
     }
 }
 
+/// Detect symmetric black cinema letterbox bars baked into a 4:3 MPEG-2 movie frame (e.g.
+/// Nightfire's 16:9 briefings and Bond intro are 512x324 letterboxed inside 512x448).
+/// Returns `None` on solid black fade frames so the active crop stays stable across fades, or
+/// `Some(crop_v)` in `0.0..=0.20` (0.0 for full-frame 4:3 movies like EA/MGM logos).
+pub fn detect_letterbox_v(w: u32, h: u32, rgba: &[u8]) -> Option<f32> {
+    if w < 16 || h < 64 || rgba.len() < (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let row_max_luma = |y: u32| -> u8 {
+        let base = (y as usize) * (w as usize) * 4;
+        let step = (w / 32).max(1) as usize;
+        let mut mx = 0u8;
+        let mut x = 0usize;
+        while x < w as usize {
+            let i = base + x * 4;
+            let l = rgba[i].max(rgba[i + 1]).max(rgba[i + 2]);
+            if l > mx { mx = l; }
+            x += step;
+        }
+        mx
+    };
+    // Guard against all-black fade frames: require active picture in the middle band.
+    let mut mid_bright = false;
+    for k in 0..8 {
+        let y = h * (30 + k * 5) / 100;
+        if row_max_luma(y) >= 28 {
+            mid_bright = true;
+            break;
+        }
+    }
+    if !mid_bright {
+        return None;
+    }
+    let max_bar = (h as f32 * 0.20) as u32;
+    let mut bar = 0u32;
+    while bar < max_bar {
+        if row_max_luma(bar) >= 16 || row_max_luma(h - 1 - bar) >= 16 {
+            break;
+        }
+        bar += 1;
+    }
+    // Only treat as genuine cinema letterbox if at least 9% top+bottom is pure black (~40px on 448).
+    let frac = bar as f32 / h as f32;
+    Some(if frac >= 0.09 { (frac - 0.005).clamp(0.0, 0.20) } else { 0.0 })
+}
+
 /// Build the non-stretching vertex list for the movie plane at `screen_aspect` (w / h).
 /// Always preserves the movie's 4:3 pixel aspect ratio (never stretches horizontally or vertically).
 pub fn movie_quad_verts(screen_aspect: f32, mode: MoviePresentation) -> Vec<HudVertex> {
+    movie_quad_verts_cropped(screen_aspect, mode, 0.0)
+}
+
+/// Same as `movie_quad_verts`, removing baked top/bottom cinema letterbox bars (`letterbox_v`)
+/// so 16:9 widescreen FMVs inside 512x448 fill widescreen/ultrawide displays cleanly without
+/// windowboxing or stretching.
+pub fn movie_quad_verts_cropped(screen_aspect: f32, mode: MoviePresentation, letterbox_v: f32) -> Vec<HudVertex> {
     let mut verts = Vec::with_capacity(24);
     let k = |x: f32, y: f32| HudVertex { p: [x, y], uv: [-1.0, -1.0], c: [0.0, 0.0, 0.0, 1.0] };
     // Full-target opaque black clear quad first so 3D frames underneath never leak through.
@@ -2041,42 +2201,42 @@ pub fn movie_quad_verts(screen_aspect: f32, mode: MoviePresentation) -> Vec<HudV
         k(-1.0, 1.0), k(1.0, -1.0), k(-1.0, -1.0),
     ]);
 
-    let movie_aspect = 4.0 / 3.0;
-    let aspect = if screen_aspect > 0.0 { screen_aspect } else { movie_aspect };
-    let fit_sx = (movie_aspect / aspect).min(1.0);
-    let fit_sy = (aspect / movie_aspect).min(1.0);
+    let lb = letterbox_v.clamp(0.0, 0.20);
+    let active_v = (1.0 - 2.0 * lb).max(0.5);
+    let content_aspect = (4.0 / 3.0) / active_v;
+    let aspect = if screen_aspect > 0.0 { screen_aspect } else { content_aspect };
+    let fit_sx = (content_aspect / aspect).min(1.0);
+    let fit_sy = (aspect / content_aspect).min(1.0);
 
     // Center quad dimensions & UVs (always 1:1 pixel aspect, zero stretching).
     let (cx, cy, u0, u1, v0, v1) = match mode {
-        MoviePresentation::Cover if aspect > movie_aspect + 0.01 => {
-            // Uniformly scale up to 1.35x so 16:10 (1.20x) and 16:9 (1.333x) fill edge-to-edge
-            // cleanly without over-cropping 21:9 / 32:9 ultrawides.
-            let zoom = (aspect / movie_aspect).min(1.35);
+        MoviePresentation::Cover if aspect > content_aspect + 0.01 => {
+            // Uniformly scale up to 1.35x so 16:10 and 16:9 fill edge-to-edge without over-cropping
+            // 21:9 / 32:9 ultrawides.
+            let zoom = (aspect / content_aspect).min(1.35);
             let sx = (fit_sx * zoom).min(1.0);
-            let crop_v = (1.0 - 1.0 / zoom) * 0.5;
-            (sx, 1.0, 0.0, 1.0, crop_v, 1.0 - crop_v)
+            let extra_v = active_v * (1.0 - 1.0 / zoom) * 0.5;
+            (sx, 1.0, 0.0, 1.0, lb + extra_v, 1.0 - lb - extra_v)
         }
-        _ => (fit_sx, fit_sy, 0.0, 1.0, 0.0, 1.0),
+        _ => (fit_sx, fit_sy, 0.0, 1.0, lb, 1.0 - lb),
     };
 
-    // Ambient wings for widescreen / ultrawide when space remains outside the unstretched picture.
+    // Soft Gaussian-blurred ambient glow wings (c.a = 0.5 triggers `sample_ambient_blur` in MOVIE_SHADER).
     if mode != MoviePresentation::Pillarbox && cx < 0.995 {
-        let outer = [0.07, 0.07, 0.09, 1.0];
-        let inner = [0.24, 0.24, 0.28, 1.0];
+        let outer = [0.04, 0.04, 0.05, 0.5];
+        let inner = [0.18, 0.18, 0.20, 0.5];
         let vl = |x: f32, y: f32, u: f32, v: f32, c: [f32; 4]| HudVertex { p: [x, y], uv: [u, v], c };
-        // Left wing: bleeds the left 18% of the frame softly to the left screen edge.
         verts.extend_from_slice(&[
-            vl(-1.0, cy, 0.18, v0, outer), vl(-cx, cy, 0.0, v0, inner), vl(-cx, -cy, 0.0, v1, inner),
-            vl(-1.0, cy, 0.18, v0, outer), vl(-cx, -cy, 0.0, v1, inner), vl(-1.0, -cy, 0.18, v1, outer),
+            vl(-1.0, cy, 0.04, v0, outer), vl(-cx, cy, 0.04, v0, inner), vl(-cx, -cy, 0.04, v1, inner),
+            vl(-1.0, cy, 0.04, v0, outer), vl(-cx, -cy, 0.04, v1, inner), vl(-1.0, -cy, 0.04, v1, outer),
         ]);
-        // Right wing: bleeds the right 18% of the frame softly to the right screen edge.
         verts.extend_from_slice(&[
-            vl(cx, cy, 1.0, v0, inner), vl(1.0, cy, 0.82, v0, outer), vl(1.0, -cy, 0.82, v1, outer),
-            vl(cx, cy, 1.0, v0, inner), vl(1.0, -cy, 0.82, v1, outer), vl(cx, -cy, 1.0, v1, inner),
+            vl(cx, cy, 0.96, v0, inner), vl(1.0, cy, 0.96, v0, outer), vl(1.0, -cy, 0.96, v1, outer),
+            vl(cx, cy, 0.96, v0, inner), vl(1.0, -cy, 0.96, v1, outer), vl(cx, -cy, 0.96, v1, inner),
         ]);
     }
 
-    // Crisp, unstretched center picture.
+    // Crisp bicubic-upscaled center picture (c.a = 1.0 triggers `sample_bicubic` in MOVIE_SHADER).
     let v = |x: f32, y: f32, u: f32, vv: f32| HudVertex { p: [x, y], uv: [u, vv], c: [1.0; 4] };
     verts.extend_from_slice(&[
         v(-cx, cy, u0, v0), v(cx, cy, u1, v0), v(cx, -cy, u1, v1),
@@ -2198,11 +2358,44 @@ mod shader_tests {
         assert!((cover_16_9[7].p[0] - 1.0).abs() < 1e-3, "16:9 Cover fills width cleanly");
         assert_eq!(movie_quad_verts(21.0 / 9.0, MoviePresentation::Cover).len(), 24);
     }
+    /// Letterbox detection finds baked 16:9 cinema bars inside 512x448 frames, returns 0.0 for
+    /// full-frame 4:3 frames, and returns None on solid-black fade frames (sister checks).
+    #[test]
+    fn detect_letterbox_finds_cinema_bars_and_ignores_full_frame_and_black_fades() {
+        use super::{detect_letterbox_v, movie_quad_verts_cropped, MoviePresentation};
+        let (w, h) = (64u32, 100u32);
+        // Cinema letterbox: 14% black top & bottom, bright picture in the middle.
+        let mut cinema = vec![0u8; (w * h * 4) as usize];
+        for y in 14..86 {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                cinema[i] = 180; cinema[i + 1] = 180; cinema[i + 2] = 180; cinema[i + 3] = 255;
+            }
+        }
+        let lb = detect_letterbox_v(w, h, &cinema).expect("active cinema frame");
+        assert!((lb - 0.135).abs() < 0.015, "expected ~0.135 letterbox crop, got {lb}");
+        // Cropped cinema frame fills 16:9 cleanly without stretching.
+        let verts = movie_quad_verts_cropped(16.0 / 9.0, MoviePresentation::Ambient, lb);
+        let q = &verts[verts.len() - 6..];
+        let ndc_w = (q[1].p[0] - q[0].p[0]).abs();
+        let ndc_h = (q[0].p[1] - q[2].p[1]).abs();
+        let uv_h = (q[2].uv[1] - q[0].uv[1]).abs();
+        let displayed_aspect = (ndc_w * (16.0 / 9.0)) / ndc_h;
+        let source_aspect = (4.0 / 3.0) / uv_h;
+        assert!((displayed_aspect - source_aspect).abs() < 1e-3, "no stretch when cropped");
+        // Sister 1: full-frame bright image -> 0.0 crop.
+        let full = vec![200u8; (w * h * 4) as usize];
+        assert_eq!(detect_letterbox_v(w, h, &full), Some(0.0));
+        // Sister 2: solid black fade frame -> None (holds previous crop without jumping).
+        let black = vec![0u8; (w * h * 4) as usize];
+        assert_eq!(detect_letterbox_v(w, h, &black), None);
+    }
+
     /// The WGSL must parse and validate offline (no GPU adapter needed). fix-lighting touched the main shader's uniform struct and
     /// light block — a syntax or validation error would break every draw at Renderer::new.
     #[test]
     fn the_shaders_parse_and_validate() {
-        for (name, src) in [("main", super::SHADER), ("hud", super::HUD_SHADER)] {
+        for (name, src) in [("main", super::SHADER), ("hud", super::HUD_SHADER), ("movie", super::MOVIE_SHADER)] {
             let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name} WGSL parse: {e}"));
             naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
                 .validate(&module).unwrap_or_else(|e| panic!("{name} WGSL validate: {e}"));
