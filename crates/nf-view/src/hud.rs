@@ -243,15 +243,22 @@ impl Hud<'_> {
     }
 
     pub(crate) fn ndc(&self, anchor: Anchor, x: f32, y: f32) -> [f32; 2] {
-        // One screen pixel in NDC across, keeping the 4:3 pixel shape at the window's height.
-        let s = 2.0 / SW * (4.0 / 3.0) / self.aspect.max(1e-3);
+        // One screen pixel in NDC across, keeping the 4:3 pixel shape at the window's height;
+        // on windows narrower than 4:3, scale uniformly so edges never clip off screen.
+        let eff = self.aspect.max(4.0 / 3.0);
+        let s = 2.0 / SW * (4.0 / 3.0) / eff;
+        let sy = if self.aspect < 4.0 / 3.0 && !matches!(anchor, Anchor::Stretch) {
+            (self.aspect / (4.0 / 3.0)).max(0.25)
+        } else {
+            1.0
+        };
         let nx = match anchor {
             Anchor::Left => -1.0 + x * s,
             Anchor::Right => 1.0 - (SW - x) * s,
             Anchor::Centre => (x - SW / 2.0) * s,
             Anchor::Stretch => x / SW * 2.0 - 1.0,
         };
-        [nx, 1.0 - y / (SH / 2.0)]
+        [nx, (1.0 - y / (SH / 2.0)) * sy]
     }
 
     /// A textured quad at (x, y) w × h (screen pixels) showing texels (u, v, du, dv) of `tex`; `flip` = (U, V).

@@ -821,8 +821,19 @@ impl DrivingState {
         };
         h.last_tick = ticks;
         let out = h.draw.frame(&h.layout, &input, nf_game::driving_hud_draw::HudStrings { font: &h.font, loc: &h.loc });
-        let s = 2.0 / 640.0 * (4.0 / 3.0) / aspect.max(1e-3);
-        let ndc = |x: f32, y: f32| [(x - 320.0) * s, 1.0 - y / 224.0];
+        let eff_aspect = aspect.max(4.0 / 3.0);
+        let s = 2.0 / 640.0 * (4.0 / 3.0) / eff_aspect;
+        let sy = if aspect < 4.0 / 3.0 { (aspect / (4.0 / 3.0)).max(0.25) } else { 1.0 };
+        let ndc_anchored = |x: f32, y: f32, cx: f32| {
+            let nx = if cx < 213.0 {
+                -1.0 + x * s
+            } else if cx > 427.0 {
+                1.0 - (640.0 - x) * s
+            } else {
+                (x - 320.0) * s
+            };
+            [nx, (1.0 - y / 224.0) * sy]
+        };
         for d in out.draws {
             let nf_game::driving_hud_draw::HudDraw::Sprite { x, y, w, h: hh, uv, sheet, colour, .. } = d else { continue };
             let Some(&(_, hash)) = h.sheets.iter().find(|(i, _)| *i == sheet) else { continue };
@@ -830,7 +841,8 @@ impl DrivingState {
             // GS colour word (R G B A bytes, 0x80 = 1.0).
             let c = [0, 8, 16, 24].map(|b| ((colour >> b) & 0xff) as f32 / 128.0);
             let c = [c[0], c[1], c[2], c[3].min(1.0)];
-            let (a, b) = (ndc(x, y), ndc(x + w, y + hh));
+            let cx = x + w * 0.5;
+            let (a, b) = (ndc_anchored(x, y, cx), ndc_anchored(x + w, y + hh, cx));
             let v = |p: [f32; 2], t: [f32; 2]| crate::gpu::HudVertex { p, uv: t, c };
             let first = f.v.len() as u32;
             f.v.extend_from_slice(&[v([a[0], a[1]], [uv[0], uv[1]]), v([b[0], a[1]], [uv[2], uv[1]]), v([b[0], b[1]], [uv[2], uv[3]]), v([a[0], a[1]], [uv[0], uv[1]]), v([b[0], b[1]], [uv[2], uv[3]]), v([a[0], b[1]], [uv[0], uv[3]])]);

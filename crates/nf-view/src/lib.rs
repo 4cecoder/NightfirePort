@@ -2543,6 +2543,17 @@ pub fn cutscene_frame(win_w: f32, win_h: f32, game_aspect: f32) -> (f32, [f32; 4
     (game, [(win_w - bw) * 0.5, (win_h - bh) * 0.5, bw, bh])
 }
 
+/// Adaptive widescreen cutscene framing: when widescreen is enabled (`game_aspect > 4/3`),
+/// adapts Hor+ to the live window aspect (16:10 MacBook, 16:9, 21:9 ultrawide) with full viewport
+/// and zero pillar-boxing; when 4:3 is selected, keeps exact [`cutscene_frame`] pillar-boxing.
+pub fn adaptive_cutscene_frame(win_w: f32, win_h: f32, game_aspect: f32) -> (f32, [f32; 4]) {
+    if game_aspect > (4.0 / 3.0) + 0.01 && win_w > 0.0 && win_h > 0.0 {
+        let win_aspect = (win_w / win_h).max(4.0 / 3.0);
+        return (win_aspect, [0.0, 0.0, win_w, win_h]);
+    }
+    cutscene_frame(win_w, win_h, game_aspect)
+}
+
 /// The HUD frame the headless `--shot` render draws (fix-cutscene-letterbox): the gameplay
 /// overlay (`overlay_for` — empty while a script camera runs) PLUS the script player's overlay —
 /// the fade, the letterbox bars and the op-0x14 sprites (`Scene::script_overlay_hud`). The shot
@@ -6684,9 +6695,10 @@ impl App {
                 // the cut-scene with it — see cutscene_frame. The game's default (row off) is 4/3.
                 // The front end is closed during play, so the option's value outlives it here.
                 if let Some(fe) = self.fe.as_ref() { self.game_aspect = fe.view_aspect(); }
+                if std::env::var_os("NF_WIDESCREEN").is_some() { self.game_aspect = aspect0.max(16.0 / 9.0); }
                 let game_aspect = self.game_aspect;
                 if let Some(sim) = self.scene.sim.as_mut() { sim.view_aspect = game_aspect; }
-                let (proj_aspect, band) = if cutscene { cutscene_frame(g.config.width as f32, g.config.height as f32, game_aspect) } else { (aspect0, [0.0; 4]) };
+                let (proj_aspect, band) = if cutscene { adaptive_cutscene_frame(g.config.width as f32, g.config.height as f32, game_aspect) } else { (aspect0, [0.0; 4]) };
                 let (vp0, _) = draw_cam.view_proj_for(proj_aspect, self.scene.mirror_x);
                 // One visibility walk per frame, shared by the palette's object cull and render's
                 // World cull (fix-portal): the eye's cel from `Camera_CheckLocation` 0x1bae90's

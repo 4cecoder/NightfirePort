@@ -15,10 +15,10 @@ use nf_view::gpu::{self, Renderer};
 use nf_view::menu::{self, Action as MenuAction, FrontEnd};
 use nf_view::scene::{Scene, ViewOpts};
 use nf_view::{
-    billboard_axes, build_sound, cam_axes, cutscene_frame, dead_destroy_centres, destroy_tints,
-    device, gpu_instance_headless, load_front_end, load_mp_carry, load_with_carry_difficulty,
-    overlay_for, particles_for, shot_hud, snow_for, sound_tick, view_fov, wreck_draw_centres,
-    Camera, GAME_FOV,
+    adaptive_cutscene_frame, billboard_axes, build_sound, cam_axes, dead_destroy_centres,
+    destroy_tints, device, gpu_instance_headless, load_front_end, load_mp_carry,
+    load_with_carry_difficulty, overlay_for, particles_for, shot_hud, snow_for, sound_tick,
+    view_fov, wreck_draw_centres, Camera, GAME_FOV,
 };
 
 pub const BTN_FIRE: i32 = 1 << 0;
@@ -531,9 +531,13 @@ impl MacEngine {
             .sim
             .as_ref()
             .is_some_and(|s| s.script_camera().is_some());
-        let game_aspect = self.scene.sim.as_ref().map_or(4.0 / 3.0, |s| s.view_aspect);
+        let game_aspect = if std::env::var_os("NF_WIDESCREEN").is_some() {
+            aspect.max(16.0 / 9.0)
+        } else {
+            self.scene.sim.as_ref().map_or(4.0 / 3.0, |s| s.view_aspect)
+        };
         let (proj_aspect, band) = if cut {
-            cutscene_frame(w as f32, h as f32, game_aspect)
+            adaptive_cutscene_frame(w as f32, h as f32, game_aspect)
         } else {
             (aspect, [0.0; 4])
         };
@@ -809,9 +813,13 @@ impl MacEngine {
                 .sim
                 .as_ref()
                 .is_some_and(|s| s.script_camera().is_some());
-            let game_aspect = self.scene.sim.as_ref().map_or(4.0 / 3.0, |s| s.view_aspect);
+            let game_aspect = if std::env::var_os("NF_WIDESCREEN").is_some() {
+                aspect.max(16.0 / 9.0)
+            } else {
+                self.scene.sim.as_ref().map_or(4.0 / 3.0, |s| s.view_aspect)
+            };
             let (proj_aspect, band) = if cut {
-                cutscene_frame(w as f32, h as f32, game_aspect)
+                adaptive_cutscene_frame(w as f32, h as f32, game_aspect)
             } else {
                 (aspect, [0.0; 4])
             };
