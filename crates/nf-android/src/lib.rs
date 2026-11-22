@@ -293,6 +293,12 @@ mod android_impl {
         let fe = if is_fe {
             let mut f = FrontEnd::new();
             f.unlock_all = true;
+            let profile_dir = std::path::Path::new(data_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(data_path))
+                .join("profiles");
+            let _ = std::fs::create_dir_all(&profile_dir);
+            f.set_profile_dir(profile_dir);
             Some(f)
         } else {
             None
