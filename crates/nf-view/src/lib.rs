@@ -6813,8 +6813,11 @@ impl App {
                     && !self.fe.as_ref().is_some_and(|fe| fe.flow.movie_pending);
                 let movie_up = intro_up || flow_up || aux_up || attract_up || win_up;
                 let movie_frame = if movie_up { self.movie.as_mut().and_then(|p| p.present()) } else { None };
-                // The MP standings keep a constant on-screen text size (the lobby's view_h rule).
-                hud::set_view_h(g.config.height as f32);
+                // The MP standings keep a constant on-screen text size (the lobby's view_h rule);
+                // divide physical framebuffer height by the Retina/HiDPI scale factor so 2x displays
+                // keep the same logical text size while rendering 3D at native physical resolution.
+                let logical_h = g.config.height as f32 / (g.window.scale_factor().max(1.0) as f32);
+                hud::set_view_h(logical_h);
                 let mut hud = if let Some(fe) = self.fe.as_mut() {
                     let lang = self.lang.as_ref().or_else(|| self.scene.sim.as_ref().and_then(|s| s.lang.as_ref()));
                         // fe-60hz: the front end's 60 Hz tick moved into `frame` (the draw half
@@ -6854,7 +6857,7 @@ impl App {
                         if fe.page == menu::Page::Pause {
                             if let Some(sim) = self.scene.sim.as_ref() { fe.pause_objectives = pause_objective_rows(sim); fe.stats = pause_stats(sim); }
                         }
-                        fe.view_h = g.config.height as f32;
+                        fe.view_h = logical_h;
                         let mut f = match &self.scene.hud {
                             Some(tables) => menu::menu_overlay_fonts(fe, &tables.font, &tables.font_header, Some(&tables.font_medium), lang, &self.scene.hud_textures, aspect),
                             None => overlay_for(&self.scene, aspect),
@@ -7405,8 +7408,13 @@ impl ApplicationHandler for App {
         let disp = settings::display_path().map(|p| settings::display_at(&p)).unwrap_or_default();
         let mut attrs = Window::default_attributes().with_title("nf-view")
             .with_fullscreen(disp.fullscreen.then_some(winit::window::Fullscreen::Borderless(None)));
-        // The saved windowed size (Alt+PageUp/PageDown presets or a dragged edge, kept on close).
-        if let Some((w, h)) = disp.size { attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)); }
+        // The saved windowed size (Alt+PageUp/PageDown presets or a dragged edge, kept on close);
+        // otherwise open at a crisp 1280×720 logical size (2560×1440 native Metal on 2× Retina).
+        if let Some((w, h)) = disp.size {
+            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+        } else {
+            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+        }
         eprintln!("start: creating the window");
         let window = Arc::new(el.create_window(attrs).expect("create window"));
         eprintln!("gpu: creating the instance and choosing an adapter");
@@ -7512,6 +7520,17 @@ impl ApplicationHandler for App {
                 // Minimised windows report 0×0; a surface cannot be configured at that size.
                 g.minimized = s.width == 0 || s.height == 0;
                 if !g.minimized {
+                    g.config.width = s.width;
+                    g.config.height = s.height;
+                    g.surface.configure(&g.device, &g.config);
+                    g.depth = gpu::depth_view(&g.device, g.config.width, g.config.height);
+                }
+                g.window.request_redraw();
+            },
+            WindowEvent::ScaleFactorChanged { .. } => if let Some(g) = &mut self.gfx {
+                let s = g.window.inner_size();
+                g.minimized = s.width == 0 || s.height == 0;
+                if !g.minimized && (g.config.width != s.width || g.config.height != s.height) {
                     g.config.width = s.width;
                     g.config.height = s.height;
                     g.surface.configure(&g.device, &g.config);
