@@ -224,10 +224,25 @@ struct HO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @locati
     o.c = c;
     return o;
 }
+// System-agnostic smooth pixel-art / HUD / font / FMV upscaler:
+// Strictly 2x2-texel footprint (zero atlas bleed) with cubic Hermite sub-texel smoothing
+// modulated by screen-space magnification so low-res PS2 UI/movies look smooth on Retina/OLED.
+fn sample_smooth(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
+    let dim = vec2<f32>(textureDimensions(t));
+    let texel = uv * dim - 0.5;
+    let d = max(abs(dpdx(texel)), abs(dpdy(texel)));
+    let mag = clamp(1.0 - max(d.x, d.y), 0.0, 1.0);
+    let base = floor(texel);
+    let f = texel - base;
+    let smooth_f = f * f * (3.0 - 2.0 * f);
+    let blended_f = mix(f, smooth_f, mag * 0.85);
+    let su = (base + blended_f + 0.5) / dim;
+    return textureSampleLevel(t, s, su, 0.0);
+}
 // uv < 0: a plain colour; else the HUD texture modulated by the colour on the GS scale (1.0 = 0x80, so up to 2×).
 @fragment fn fs(i: HO) -> @location(0) vec4<f32> {
+    let t = sample_smooth(tex, samp, i.uv);
     if (i.uv.x < 0.0) { return vec4<f32>(min(i.c.rgb * 1.1328125, vec3<f32>(1.0)), i.c.a); }
-    let t = textureSample(tex, samp, i.uv);
     return vec4<f32>(min(t.rgb * i.c.rgb * 1.1328125, vec3<f32>(1.0)), min(t.a * i.c.a, 1.0));
 }
 // The game's HUD sprites (`View_DrawSprites` 0x1e5290 → `psiDrawSprites` 0x120e68 → `FillSpriteData`
@@ -240,8 +255,8 @@ struct HO { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @locati
 // One-factor pipelines. Equal to the GS result wherever it is below 1.0; where gain·Cs·As ≥ 1 the
 // target's own clamp gives the same 1.0 (or 0.0 for the subtract).
 @fragment fn fs_ps2(i: HO) -> @location(0) vec4<f32> {
+    let t = sample_smooth(tex, samp, i.uv);
     if (i.uv.x < 0.0) { let a = clamp(i.c.a, 0.0, 1.0); return vec4<f32>(min(i.c.rgb, vec3<f32>(1.0)) * a * 1.1328125, a); }
-    let t = textureSample(tex, samp, i.uv);
     let a = min(t.a * i.c.a, 1.0);
     return vec4<f32>(min(t.rgb * i.c.rgb, vec3<f32>(1.0)) * a * 1.1328125, a);
 }
@@ -870,32 +885,52 @@ impl Renderer {
             (buf, bg)
         };
         let (uniform, uniform_bg) = make_uniform();
+        // System-agnostic 3D world sampler: trilinear mipmaps + 16x anisotropic filtering
+        // eliminates distant road/wall shimmer on Retina/4K/mobile OLED across Metal/Vulkan/DX12.
         let sampler = dc(device, "gpu: create_sampler").create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat, address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default()
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 16,
+            ..Default::default()
         });
-        let make_tex2 =|w: u32, h: u32, rgba: &[u8]| {
+        let hud_sampler = dc(device, "gpu: create_sampler").create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat, address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let make_tex_impl = |w: u32, h: u32, rgba: &[u8], mipmap: bool| {
             // The game stages level/HUD texture patches through a double-buffered GS VRAM bump
             // allocator per frame (unported-misc-1: initcache 0x109688 / allocache 0x109700 /
             // CacheTexture 0x11cd58 / CacheFlipBuffers 0x1095d0 — docs/systems/boot-fs-cache.md);
             // here every texture is decoded once and uploaded directly, which is the same job
             // without the per-frame staging window.
+            let mips = if mipmap && w > 1 && h > 1 {
+                generate_mip_chain(w, h, rgba)
+            } else {
+                vec![(w, h, rgba.to_vec())]
+            };
             let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
             let t = dc(device, "gpu: create_texture").create_texture(&wgpu::TextureDescriptor {
-                label: None, size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                label: None, size, mip_level_count: mips.len() as u32, sample_count: 1, dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
             });
-            wt(queue, 
-                wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                rgba, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) }, size);
+            for (lvl, (mw, mh, data)) in mips.iter().enumerate() {
+                wt(queue,
+                    wgpu::TexelCopyTextureInfo { texture: &t, mip_level: lvl as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    data, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * mw), rows_per_image: Some(*mh) },
+                    wgpu::Extent3d { width: *mw, height: *mh, depth_or_array_layers: 1 });
+            }
             let view = t.create_view(&Default::default());
+            let samp = if mipmap { &sampler } else { &hud_sampler };
             let bg = dc(device, "gpu: create_bind_group").create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None, layout: &tbgl,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }],
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(samp) }],
             });
             (bg, view)
         };
-        let make_tex = |w: u32, h: u32, rgba: &[u8]| make_tex2(w, h, rgba).0;
+        let make_tex2 = |w: u32, h: u32, rgba: &[u8]| make_tex_impl(w, h, rgba, true);
+        let make_tex = |w: u32, h: u32, rgba: &[u8]| make_tex_impl(w, h, rgba, false).0;
         /* Citations (unported-front-end-menus-1) — every texture here is uploaded linear-RGBA and stays resident
         for the whole level, which replaces the game's PS2 VRAM texture-cache plumbing outright (all reached per
         frame / per level load; evidence in docs/systems/psi-render-plumbing.md):
@@ -1068,7 +1103,7 @@ impl Renderer {
             for ch in &cel_graph.chains { for &c in ch { if (c as usize) < n { reached[c as usize] = true; } } }
             reached.iter().map(|r| !r).collect()
         };
-        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, movie_presentation: MoviePresentation::Pillarbox, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler: sampler, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
+        Renderer { shard_pipeline, shard_vbuf, shard_groups: Vec::new(), particle_alpha_pipeline, particle_add_pipeline, particle_vbuf, particle_groups: Vec::new(), woman_tex, snow_pipeline, snow_vbuf, snow_bg, hud_pipeline, hud_add_pipeline, hud_sub_pipeline, hud_vbuf, hud_bgs, pipelines, fog, notex, nofog, uniform, uniform_bg, staged: Vec::new(), orphan_nodes, destroy_dead: Vec::new(), destroy_wreck_draw: Vec::new(), destroy_wreck_all: scene.destroy_wrecks.iter().map(|(c, _)| c.map(f32::to_bits)).collect(), destroy_tint: Vec::new(), batch, vbuf, skin_buf, snow_skin, pal_buf, col_buf, wts_buf, mtg_buf, skin_layout, skin_pos: Default::default(), skin_collapsed: Default::default(), pal_shadow: Default::default(), sub_runs, sub_meta, live_prefix: Vec::new(), split_runs: true, last_indices: 0, char_light_centre: Vec::new(), lights: Default::default(), light_memo: Vec::new(), light_memo_gen: 1, light_memo_lights: Default::default(), los_memo: Vec::new(), los_memo_world: (0, 0), wreck_of: Vec::new(), wreck_of_src: Vec::new(), dead_sorted: Vec::new(), screen_aspect: 0.0, movie_presentation: MoviePresentation::Pillarbox, screen_offset: [0.0; 2], ibuf, tex_bgs, tex_frames, draws, order: Vec::with_capacity(order_cap), cel_boxes, cel_graph, viewer_cel: Default::default(), last_vis: None, last_cell_vis: None, movie_tex: None, movie_bg: None, movie_size: None, movie_vbuf, hud_tbgl: tbgl, hud_sampler, sky_flash_mask: 0, sky_spin: 0.0, pass_timestamps: None, probe_skip: Vec::new(), refl }
     }
 
     /// The game's depth-0 pyramid for the walk [M `Vision_Calculate_View_Fustrum` 0x1e7df8,
@@ -2050,8 +2085,85 @@ pub fn movie_quad_verts(screen_aspect: f32, mode: MoviePresentation) -> Vec<HudV
     verts
 }
 
+/// Generate a premultiplied-alpha-weighted 2x2 mipmap chain for 3D textures so alpha cutouts
+/// (foliage, grates, decals) stay clean without dark fringes on trilinear + anisotropic sampling.
+pub fn generate_mip_chain(w: u32, h: u32, rgba: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut levels = Vec::new();
+    let expected = (w as usize) * (h as usize) * 4;
+    if w == 0 || h == 0 || rgba.len() < expected {
+        return vec![(w.max(1), h.max(1), rgba.to_vec())];
+    }
+    levels.push((w, h, rgba[..expected].to_vec()));
+    let (mut cw, mut ch) = (w, h);
+    while cw > 1 || ch > 1 {
+        let nw = (cw / 2).max(1);
+        let nh = (ch / 2).max(1);
+        let prev = &levels.last().unwrap().2;
+        let mut next = vec![0u8; (nw as usize) * (nh as usize) * 4];
+        for y in 0..nh {
+            for x in 0..nw {
+                let mut r = 0u32;
+                let mut g = 0u32;
+                let mut b = 0u32;
+                let mut a_sum = 0u32;
+                let mut w_sum = 0u32;
+                for dy in 0..2u32 {
+                    let sy = (y * 2 + dy).min(ch - 1);
+                    for dx in 0..2u32 {
+                        let sx = (x * 2 + dx).min(cw - 1);
+                        let i = ((sy * cw + sx) as usize) * 4;
+                        let a = prev[i + 3] as u32;
+                        a_sum += a;
+                        if a > 0 {
+                            r += (prev[i] as u32) * a;
+                            g += (prev[i + 1] as u32) * a;
+                            b += (prev[i + 2] as u32) * a;
+                            w_sum += a;
+                        }
+                    }
+                }
+                let out = ((y * nw + x) as usize) * 4;
+                let a = ((a_sum + 2) / 4).min(255) as u8;
+                if w_sum > 0 {
+                    next[out] = ((r + w_sum / 2) / w_sum).min(255) as u8;
+                    next[out + 1] = ((g + w_sum / 2) / w_sum).min(255) as u8;
+                    next[out + 2] = ((b + w_sum / 2) / w_sum).min(255) as u8;
+                }
+                next[out + 3] = a;
+            }
+        }
+        levels.push((nw, nh, next));
+        cw = nw;
+        ch = nh;
+    }
+    levels
+}
+
 #[cfg(test)]
 mod shader_tests {
+    /// Mipmap chain generation must produce log2(max(w,h))+1 levels down to 1x1 and preserve
+    /// RGB colour on alpha-cutout edges without black-fringe darkening.
+    #[test]
+    fn mip_chain_preserves_cutout_colour_and_dimensions() {
+        use super::generate_mip_chain;
+        // 4x4 texture: half bright green opaque, half transparent black.
+        let mut rgba = vec![0u8; 4 * 4 * 4];
+        for y in 0..4 {
+            for x in 0..2 {
+                let i = (y * 4 + x) * 4;
+                rgba[i] = 40; rgba[i + 1] = 220; rgba[i + 2] = 60; rgba[i + 3] = 255;
+            }
+        }
+        let mips = generate_mip_chain(4, 4, &rgba);
+        assert_eq!(mips.len(), 3, "4x4 -> 2x2 -> 1x1");
+        assert_eq!((mips[0].0, mips[0].1), (4, 4));
+        assert_eq!((mips[1].0, mips[1].1), (2, 2));
+        assert_eq!((mips[2].0, mips[2].1), (1, 1));
+        // Sister: alpha-weighted RGB keeps green=220 (not darkened to 110) while alpha averages to 128.
+        let p = &mips[2].2;
+        assert_eq!(p[1], 220, "cutout RGB must not darken toward black");
+        assert!((p[3] as i32 - 128).abs() <= 1, "alpha averages to ~128, got {}", p[3]);
+    }
     /// Adaptive movie framing must never stretch pixels on any display aspect (portrait, 4:3,
     /// 16:10, 16:9, 21:9, 32:9). Sister: `Ambient` adds wings on widescreen whereas `Pillarbox`
     /// keeps only the black clear + centered quad.
