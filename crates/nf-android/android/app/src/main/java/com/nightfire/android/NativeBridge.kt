@@ -26,6 +26,8 @@ object NativeBridge {
     const val MENU_SIDE = 6
     const val MENU_EXTRA = 7
 
+    /** Initialize ndk-context (required by Oboe/AAudio for movie and game audio). */
+    external fun nativeSetContext(context: android.content.Context)
     /** `telemetry`: stream debug NDJSON to 127.0.0.1:9876 and accept commands on 127.0.0.1:9877. */
     external fun nativeInit(dataPath: String, telemetry: Boolean): Boolean
     external fun nativeSurfaceCreated(surface: Surface, width: Int, height: Int): Boolean

@@ -286,6 +286,25 @@ mod android_impl {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_com_nightfire_android_NativeBridge_nativeSetContext(
+        env: JNIEnv,
+        _cls: JClass,
+        context: JObject,
+    ) {
+        static CTX_ONCE: std::sync::Once = std::sync::Once::new();
+        CTX_ONCE.call_once(|| {
+            if let (Ok(vm), Ok(global)) = (env.get_java_vm(), env.new_global_ref(context)) {
+                let vm_ptr = vm.get_java_vm_pointer() as *mut std::ffi::c_void;
+                let ctx_ptr = global.as_raw() as *mut std::ffi::c_void;
+                std::mem::forget(global);
+                unsafe {
+                    ndk_context::initialize_android_context(vm_ptr, ctx_ptr);
+                }
+            }
+        });
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_com_nightfire_android_NativeBridge_nativeInit(
         mut env: JNIEnv,
         _cls: JClass,

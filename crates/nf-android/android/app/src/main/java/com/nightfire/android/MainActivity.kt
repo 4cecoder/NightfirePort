@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
         val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         val telemetry = debuggable && intent.getBooleanExtra("nf_telemetry", false)
 
+        NativeBridge.nativeSetContext(applicationContext)
         val extDir = File(getExternalFilesDir(null), "carved")
         val intDir = File(filesDir, "carved")
         val obbFile = obbDir?.listFiles()?.firstOrNull { it.name.endsWith(".obb") && it.isFile }
