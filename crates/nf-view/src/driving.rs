@@ -701,6 +701,44 @@ impl DrivingState {
                 p.scope_held, &mut p.target_fov, &mut p.zoomed_fov, 0.0, 60.0, p.arm.min_fov.max(2.0),
             );
             let now = self.ticks as i32;
+            // Gentle AimArm auto-aim magnetism when scoped or firing toward nearest live hostile.
+            if (p.scope_held || p.fire) && self.hostiles.is_some() {
+                let (eye, yaw, pitch) = self.pov_eye_and_angles(&p);
+                if let Some(h) = self.hostiles.as_ref() {
+                    let max_dy = (p.arm.autoaim_yaw.max(0.12)) / std::f32::consts::TAU;
+                    let max_dp = (p.arm.autoaim_pitch.max(0.09)) / std::f32::consts::TAU;
+                    let mut best: Option<(f32, f32, f32)> = None;
+                    for v in &h.world.live {
+                        if v.health <= 0.0 { continue; }
+                        let is_friendly = h.world.db.elements.get(v.element)
+                            .is_some_and(|e| e.rec.name.to_ascii_lowercase().contains("paradis"));
+                        if is_friendly { continue; }
+                        let vp = v.pos();
+                        let dx = vp[0] - eye[0];
+                        let dy = (vp[1] + 0.8) - eye[1];
+                        let dz = vp[2] - eye[2];
+                        let horiz = (dx * dx + dz * dz).sqrt().max(0.001);
+                        let t_yaw = dx.atan2(dz);
+                        let t_pitch = dy.atan2(horiz);
+                        let mut d_yaw = (t_yaw - yaw) / std::f32::consts::TAU;
+                        while d_yaw > 0.5 { d_yaw -= 1.0; }
+                        while d_yaw < -0.5 { d_yaw += 1.0; }
+                        let d_pitch = (t_pitch - pitch) / std::f32::consts::TAU;
+                        if d_yaw.abs() <= max_dy && d_pitch.abs() <= max_dp {
+                            let score = d_yaw * d_yaw + d_pitch * d_pitch;
+                            if best.map_or(true, |b| score < b.0) {
+                                best = Some((score, d_yaw, d_pitch));
+                            }
+                        }
+                    }
+                    if let Some((_, d_yaw, d_pitch)) = best {
+                        let pull = (0.18 * p.arm.autoaim_speed.max(0.5)).clamp(0.05, 0.35);
+                        p.yaw_turns += d_yaw * pull;
+                        p.pitch_turns += d_pitch * pull;
+                        p.arm.limits.clamp_view(&mut p.pitch_turns, &mut p.yaw_turns);
+                    }
+                }
+            }
             if std::mem::take(&mut p.fire) && p.ammo > 0 && now - p.last_shot_tick >= 5 {
                 p.ammo -= 1;
                 p.last_shot_tick = now;
@@ -709,8 +747,15 @@ impl DrivingState {
                 let cp = pitch.cos();
                 let dir = [yaw.sin() * cp, pitch.sin(), yaw.cos() * cp];
                 if let Some(h) = self.hostiles.as_mut() {
-                    let targets: Vec<nf_game::driving::flight::ShotTarget> = h.world.live.iter().map(|v| {
-                        nf_game::driving::flight::ShotTarget { id: v.element, center: v.pos(), radius: 3.5 }
+                    let targets: Vec<nf_game::driving::flight::ShotTarget> = h.world.live.iter().filter_map(|v| {
+                        if v.health <= 0.0 { return None; }
+                        let is_friendly = h.world.db.elements.get(v.element)
+                            .is_some_and(|e| e.rec.name.to_ascii_lowercase().contains("paradis"));
+                        if is_friendly { return None; }
+                        let vp = v.pos();
+                        let dist = ((vp[0] - eye[0]).powi(2) + (vp[1] - eye[1]).powi(2) + (vp[2] - eye[2]).powi(2)).sqrt();
+                        let radius = (3.5 + dist * 0.04).min(8.5);
+                        Some(nf_game::driving::flight::ShotTarget { id: v.element, center: [vp[0], vp[1] + 0.6, vp[2]], radius })
                     }).collect();
                     if let Some((elem, _, _)) = nf_game::driving::flight::nearest_hit(eye, dir, &targets) {
                         h.world.damage(elem, 50.0);
@@ -1376,28 +1421,41 @@ impl DrivingState {
                 i.step();
                 if paris_transition {
                     self.in_heli = false;
+                    self.cam = None;
                     eprintln!("[mis01] ECustomTransition(\"paris\") -> switching to Aston Martin V12 Vanquish!");
                 }
                 if let Some(ti) = reset_trigger {
                     if let Some(tr) = sc.map.triggers.get(ti) {
                         let p = tr.pos;
                         let ground = self.collision.ground_y(p[0], p[1] + 2.0, p[2]).unwrap_or(p[1]);
-                        self.car.pos = [p[0], ground + self.car.params.spring_rest, p[2]];
+                        self.car.pos = [p[0], ground + self.car.rest_height() + 0.05, p[2]];
                         self.car.vel = [0.0; 3];
+                        self.car.ang_vel = [0.0; 3];
+                        self.car.yaw_rate = 0.0;
                         let yaw = tr.dir[0].atan2(tr.dir[2]);
                         self.car.yaw = yaw;
                         let (s, c) = (yaw.sin(), yaw.cos());
                         self.car.rot = [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]];
+                        self.cam = None;
                         eprintln!("[mis01] EResetPlayerCarPos -> trigger {ti} at {:?}", self.car.pos);
                     }
                 }
                 // A scripted spline carries the car (the path player's row 3 into the car matrix [S]).
-                // The velocity is the path player's: the position step x fps [M 0x1b14b8, 0x131620];
-                // `o` is last tick's spline point, as `step` leaves the body alone on a spline.
+                // Update both velocity and horizontal yaw/rot so the helicopter turns along the Seine
+                // and `ViewLimits::clamp_view` tracks the pursuing cars accurately.
                 if let Some(q) = i.spline_position(paths) {
                     let o = self.car.pos;
-                    self.car.vel = [(q[0] - o[0]) * 60.0, (q[1] - o[1]) * 60.0, (q[2] - o[2]) * 60.0];
+                    let vx = (q[0] - o[0]) * 60.0;
+                    let vy = (q[1] - o[1]) * 60.0;
+                    let vz = (q[2] - o[2]) * 60.0;
+                    self.car.vel = [vx, vy, vz];
                     self.car.pos = q;
+                    if vx * vx + vz * vz > 0.25 {
+                        let yaw = vx.atan2(vz);
+                        self.car.yaw = yaw;
+                        let (s, c) = (yaw.sin(), yaw.cos());
+                        self.car.rot = [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]];
+                    }
                 }
             }
         } else {

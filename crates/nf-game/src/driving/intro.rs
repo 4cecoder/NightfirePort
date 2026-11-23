@@ -365,9 +365,9 @@ impl IntroState {
             // [S] that +0x27c(3) releases either stop mode.
             0xdb => self.stop = None,
             0x6c => self.autodrive_speed = Some(a.float(1)),
-            // EPathSetDesiredThrottleStatic 0x152cb0 / EPathSetTimeStatic 0x153340 on the
-            // player's path player (both selectors 0).
-            0x74 => {
+            // EPathSetDesiredThrottleStatic 0x152cb0 / EPathChangeThrottleStatic 0xd7 /
+            // EPathSetTimeStatic 0x153340 on the player's path player (both selectors 0).
+            0x74 | 0xd7 => {
                 if a.word(1) == 0 && a.word(2) == 0 {
                     self.path.target = a.float(3);
                 }

@@ -79,6 +79,7 @@ pub enum LiveCmd {
         target: String,
         path: String,
     },
+    Menu(String),
     Shot(String),
 }
 
@@ -318,6 +319,10 @@ pub fn parse_command(line: &str) -> Result<LiveCmd, String> {
                 target: parts[1].to_ascii_lowercase(),
                 path: parts[2].to_string(),
             })
+        }
+        "menu" => {
+            let act = parts.get(1).ok_or("usage: menu <up|down|left|right|confirm|back|side|extra>")?.to_ascii_lowercase();
+            Ok(LiveCmd::Menu(act))
         }
         "shot" => {
             let path = parts.get(1).ok_or("usage: shot <path.png>")?.to_string();

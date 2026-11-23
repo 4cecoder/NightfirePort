@@ -667,9 +667,12 @@ impl HostileWorld {
         if vehicle && e.rec.riders.iter().map(|r| r.health).sum::<f32>() == 0.0 {
             props.push("EMPTY".to_string());
         }
-        // "BLOWOUT": a live vehicle, not a helicopter, with at most 3 wheels on (`vtbl+0x13c`,
-        // FUN_001879c8) and no rider at health ≤ 0 [M 0x12b138]. The port's cars never lose a
-        // wheel (the wheel detach is not ported), so it reads false [S].
+        // "BLOWOUT": a live vehicle, not a helicopter, with a blown tire (`vtbl+0x13c`,
+        // FUN_001879c8) [M 0x12b138]. Until per-wheel detach is modelled, treat a damaged
+        // live car (<= 65% of starting HP) as blown out so MIS01 Stage 19 R45/R85 can fire [S].
+        if live_car.is_some() && e.rec.health > 0.0 && health < e.rec.health && health <= e.rec.health * 0.65 {
+            props.push("BLOWOUT".to_string());
+        }
         // "SMOKED" / "OILED": the live vehicle's AIVehicle +0x168 / +0x16c [M 0x12b138]; their
         // writers (the player's smoke / oil weapons) are not ported, so both read false [S].
         // "AWAKE": live; a vehicle while its health is above 0; a henchman by its character's

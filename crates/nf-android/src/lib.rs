@@ -782,6 +782,25 @@ mod android_impl {
                         if *crouch { app.input.buttons |= BTN_CROUCH; } else { app.input.buttons &= !BTN_CROUCH; }
                         "{\"ok\":true}".into()
                     }
+                    LiveCmd::Menu(act) => {
+                        let parsed = match act.as_str() {
+                            "up" => Some(MenuAction::Up),
+                            "down" => Some(MenuAction::Down),
+                            "left" => Some(MenuAction::Left),
+                            "right" => Some(MenuAction::Right),
+                            "confirm" | "ok" | "x" | "select" => Some(MenuAction::Confirm),
+                            "back" | "cancel" | "triangle" => Some(MenuAction::Back),
+                            "side" | "square" => Some(MenuAction::Side),
+                            "extra" | "circle" => Some(MenuAction::Extra),
+                            _ => None,
+                        };
+                        if let Some(a) = parsed {
+                            app.input.pending_menu_actions.push(a);
+                            format!("{{\"ok\":true,\"menu\":\"{}\"}}", escape_json(act))
+                        } else {
+                            format!("{{\"ok\":false,\"err\":\"unknown menu action '{}'\"}}", escape_json(act))
+                        }
+                    }
                     LiveCmd::Shot(_) => "{\"ok\":false,\"err\":\"use adb screencap on Android\"}".into(),
                 };
                 req.respond(reply);
@@ -823,6 +842,24 @@ mod android_impl {
                     }
                 } else {
                     fe.action(a);
+                }
+            }
+            let menu_rm: Vec<u32> = fe.drain_sfx_removes().collect();
+            let menu_sfx: Vec<menu::MenuSfx> = fe.drain_sfx().collect();
+            if !menu_sfx.is_empty() || !menu_rm.is_empty() {
+                if let Some(snd) = app.sound.as_mut() {
+                    snd.batch(|drv, out| {
+                        for id in &menu_rm {
+                            if nf_view::menu_music::menu_sfx_reaches_driver(*id) {
+                                drv.remove(0, Some(*id));
+                            }
+                        }
+                        for ev in &menu_sfx {
+                            if nf_view::menu_music::menu_sfx_reaches_driver(ev.id) {
+                                drv.start(out, ev.id, None, 0, None);
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -922,9 +959,26 @@ mod android_impl {
                         0
                     };
 
+                    // Allow skipping in-mission NIS cutscenes (e.g. Equinox intro) via USE, JUMP, or PAUSE.
+                    if sim.drones.scripts.cutscene_playing()
+                        && (just & (BTN_USE | BTN_JUMP | BTN_PAUSE) != 0)
+                    {
+                        sim.drones.scripts.skip_request = true;
+                    }
+                    let in_keypad = sim.drones.keypad.is_some();
+                    let keypad_nav = if in_keypad {
+                        let mut bits = 0u8;
+                        if app.input.move_y > 0.45 { bits |= 1; }
+                        if app.input.move_y < -0.45 { bits |= 2; }
+                        if app.input.move_x < -0.45 { bits |= 4; }
+                        if app.input.move_x > 0.45 { bits |= 8; }
+                        bits
+                    } else {
+                        0
+                    };
                     let pi = nf_game::player::Input {
-                        forward: app.input.move_y,
-                        strafe: -app.input.move_x,
+                        forward: if in_keypad { 0.0 } else { app.input.move_y },
+                        strafe: if in_keypad { 0.0 } else { -app.input.move_x },
                         lift: if b & BTN_JUMP != 0 { 1.0 } else { 0.0 }
                             - if b & BTN_CROUCH != 0 { 1.0 } else { 0.0 },
                         stabilise: (b & (BTN_USE | BTN_RELOAD)) != 0,
@@ -940,14 +994,14 @@ mod android_impl {
                         zoom_cycle: 0,
                         zoom_axis: 0.0,
                         switch_to: None,
-                        fire: b & BTN_FIRE != 0,
+                        fire: !in_keypad && (b & BTN_FIRE != 0),
                         zoom: b & BTN_AIM != 0,
                         scope: b & BTN_AIM != 0,
                         mode_switch: false,
                         goggles_action: false,
-                        keypad_confirm: false,
-                        keypad_back: false,
-                        keypad_nav: 0,
+                        keypad_confirm: in_keypad && (b & (BTN_USE | BTN_FIRE) != 0),
+                        keypad_back: in_keypad && (b & (BTN_CROUCH | BTN_RELOAD) != 0),
+                        keypad_nav,
                     };
                     let fire = b & BTN_FIRE != 0;
                     let reload = just & BTN_RELOAD != 0;
@@ -1034,7 +1088,7 @@ mod android_impl {
                 pos: Vec3::new(h[0], h[1], h[2]),
                 yaw: sim.bond.yaw,
                 pitch: sim.bond.pitch * std::f32::consts::FRAC_PI_2,
-                fov: GAME_FOV,
+                fov: nf_view::view_fov(sim),
             };
             if let Some((p, yaw, pitch, fov)) = sim.script_camera() {
                 app.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov };
@@ -1110,9 +1164,11 @@ mod android_impl {
         gfx.renderer.movie_presentation = nf_view::gpu::adaptive_movie_mode(is_menu_backdrop);
         gfx.renderer.destroy_dead = dead_destroy_centres(&app.scene);
         gfx.renderer.destroy_wreck_draw = wreck_draw_centres(&app.scene);
+        gfx.renderer.destroy_tint = nf_view::destroy_tints(&app.scene);
         gfx.renderer.sky_flash_mask = app.scene.sim.as_ref().map_or(0, |s| s.drones.sky.flash_mask);
         gfx.renderer.sky_spin = app.scene.sim.as_ref().map_or(0.0, |s| s.drones.sky.spin());
         gfx.renderer.set_shards(&gfx.queue, &app.scene.shard_draws());
+        gfx.renderer.set_particles(&gfx.queue, &nf_view::particles_for(&app.scene, &app.cam));
 
         // Step FrontEnd / intro / briefing MPEG-2 movie player BEFORE building menu_hud
         // so `fe.intro_live` and `fe.backdrop_live` accurately hide the fallback plate.

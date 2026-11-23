@@ -7493,6 +7493,27 @@ impl App {
                         (_, None) => "{\"ok\":false,\"err\":\"no active GPU renderer\"}".into(),
                     }
                 }
+                live_bridge::LiveCmd::Menu(act) => {
+                    let parsed = match act.as_str() {
+                        "up" => Some(menu::Action::Up),
+                        "down" => Some(menu::Action::Down),
+                        "left" => Some(menu::Action::Left),
+                        "right" => Some(menu::Action::Right),
+                        "confirm" | "ok" | "x" | "select" => Some(menu::Action::Confirm),
+                        "back" | "cancel" | "triangle" => Some(menu::Action::Back),
+                        "side" | "square" => Some(menu::Action::Side),
+                        "extra" | "circle" => Some(menu::Action::Extra),
+                        _ => None,
+                    };
+                    match (parsed, self.fe.as_mut()) {
+                        (Some(a), Some(fe)) => {
+                            fe.action(a);
+                            format!("{{\"ok\":true,\"menu\":\"{}\",\"page\":\"{:?}\"}}", live_bridge::escape_json(act), fe.page)
+                        }
+                        (None, _) => format!("{{\"ok\":false,\"err\":\"unknown menu action '{}'\"}}", live_bridge::escape_json(act)),
+                        (_, None) => "{\"ok\":false,\"err\":\"not in FrontEnd menu\"}".into(),
+                    }
+                }
                 live_bridge::LiveCmd::Shot(path) => {
                     self.capture_req = Some(std::path::PathBuf::from(path));
                     format!("{{\"ok\":true,\"shot\":\"{}\"}}", live_bridge::escape_json(path))

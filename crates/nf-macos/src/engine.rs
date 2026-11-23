@@ -456,7 +456,17 @@ impl MacEngine {
             let brake = (-self.input.move_y).max(0.0).clamp(0.0, 1.0);
             let steer = -self.input.move_x.clamp(-1.0, 1.0);
             let handbrake = (self.input.buttons & BTN_JUMP) != 0;
-            if let Some(w) = drv.weapons.as_mut() {
+            if drv.pov_active() {
+                let dx = std::mem::take(&mut self.input.look_dx);
+                let dy = std::mem::take(&mut self.input.look_dy);
+                if dx != 0.0 || dy != 0.0 {
+                    drv.pov_aim(dx as f64, dy as f64);
+                }
+                if (self.input.buttons & BTN_FIRE) != 0 {
+                    drv.pov_fire();
+                }
+                drv.pov_scope((self.input.buttons & BTN_AIM) != 0);
+            } else if let Some(w) = drv.weapons.as_mut() {
                 w.fire |= (self.input.buttons & BTN_FIRE) != 0;
                 w.cycle |= (just & BTN_WEAP_NEXT) != 0;
             }
@@ -469,7 +479,7 @@ impl MacEngine {
                 pos: Vec3::new(p[0], p[1], p[2]),
                 yaw,
                 pitch,
-                fov: GAME_FOV,
+                fov: drv.camera_fov().to_radians(),
             };
             if matches!(
                 drv.mission_state,
