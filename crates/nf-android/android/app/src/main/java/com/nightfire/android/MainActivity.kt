@@ -586,43 +586,74 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
         var crouchActive by remember { mutableStateOf(false) }
 
         Box(modifier = modifier) {
-            // Right-half full look pad (underneath right-side buttons)
+            // Left half: Call of Duty Mobile-style floating dynamic thumbstick zone.
+            // Touch anywhere in the left half to move/steer; the stick snaps to your thumb.
+            FloatingLeftStickZone(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.45f),
+                onChange = { x, y ->
+                    moveX = x
+                    moveY = -y
+                }
+            )
+
+            // Right half: Zero-slop Call of Duty Mobile look/aim pad (no visible right joystick).
+            // Tracks a single pointer ID cleanly so multi-touch never causes camera jumps.
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .fillMaxHeight()
                     .fillMaxWidth(0.55f)
                     .pointerInput(Unit) {
-                        detectDragGestures { change, dragAmount ->
-                            change.consume()
-                            lookDx += dragAmount.x
-                            lookDy += dragAmount.y
+                        awaitPointerEventScope {
+                            var activeId: androidx.compose.ui.input.pointer.PointerId? = null
+                            var lastPos: Offset? = null
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val current = activeId?.let { id ->
+                                    event.changes.firstOrNull { it.id == id }
+                                }
+                                if (current != null && current.pressed) {
+                                    val prev = lastPos
+                                    if (prev != null) {
+                                        val delta = current.position - prev
+                                        lookDx += delta.x
+                                        lookDy += delta.y
+                                    }
+                                    lastPos = current.position
+                                    current.consume()
+                                } else {
+                                    val next = event.changes.firstOrNull { it.pressed && !it.isConsumed }
+                                    if (next != null) {
+                                        activeId = next.id
+                                        lastPos = next.position
+                                        next.consume()
+                                    } else {
+                                        activeId = null
+                                        lastPos = null
+                                    }
+                                }
+                            }
                         }
                     }
             )
 
-            // Left side: Quick Fire + Virtual Thumbstick
-            Column(
+            // Left mid-edge: secondary quick FIRE button (CoD Mobile left-index fire, clears floating stick zone)
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 24.dp, bottom = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                    .align(Alignment.CenterStart)
+                    .padding(start = 20.dp, bottom = 130.dp)
             ) {
                 CircleActionButton(
                     size = 54.dp,
                     label = "FIRE",
-                    bg = Color(0xBBD4AF37),
+                    bg = Color(0x99D4AF37),
                     activeBg = Color(0xFFFFD54F),
                     contentColor = Color(0xFF0D1117),
                     bit = NativeBridge.BTN_FIRE,
                     allowDragLook = false
-                )
-                VirtualStick(
-                    onChange = { x, y ->
-                        moveX = x
-                        moveY = -y
-                    }
                 )
             }
 
@@ -824,48 +855,80 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
     }
 
     @Composable
-    private fun VirtualStick(
+    private fun FloatingLeftStickZone(
         modifier: Modifier = Modifier,
         onChange: (Float, Float) -> Unit
     ) {
+        var origin by remember { mutableStateOf<Offset?>(null) }
         var knob by remember { mutableStateOf(Offset.Zero) }
-        val maxRadius = 92f
+        val maxRadiusDp = 62.dp
+
         Box(
-            modifier = modifier
-                .size(144.dp)
-                .clip(CircleShape)
-                .background(Color(0x441B222C))
-                .border(1.5.dp, Color(0x66D4AF37), CircleShape)
-                .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragEnd = {
-                            knob = Offset.Zero
-                            onChange(0f, 0f)
-                        },
-                        onDragCancel = {
-                            knob = Offset.Zero
-                            onChange(0f, 0f)
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            val next = knob + dragAmount
-                            val dist = hypot(next.x, next.y)
-                            knob = if (dist > maxRadius) next * (maxRadius / dist) else next
-                            onChange((knob.x / maxRadius).coerceIn(-1f, 1f), (knob.y / maxRadius).coerceIn(-1f, 1f))
+            modifier = modifier.pointerInput(Unit) {
+                val maxRadiusPx = maxRadiusDp.toPx()
+                val deadzone = 0.06f
+                awaitPointerEventScope {
+                    var activeId: androidx.compose.ui.input.pointer.PointerId? = null
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val current = activeId?.let { id ->
+                            event.changes.firstOrNull { it.id == id }
                         }
-                    )
-                },
-            contentAlignment = Alignment.Center
+                        if (current != null && current.pressed) {
+                            val base = origin ?: current.position.also { origin = it }
+                            val raw = current.position - base
+                            val dist = hypot(raw.x, raw.y)
+                            val clamped = if (dist > maxRadiusPx) raw * (maxRadiusPx / dist) else raw
+                            knob = clamped
+                            val nx = (clamped.x / maxRadiusPx).coerceIn(-1f, 1f)
+                            val ny = (clamped.y / maxRadiusPx).coerceIn(-1f, 1f)
+                            val mag = hypot(nx, ny)
+                            if (mag < deadzone) {
+                                onChange(0f, 0f)
+                            } else {
+                                onChange(nx, ny)
+                            }
+                            current.consume()
+                        } else {
+                            val next = event.changes.firstOrNull { it.pressed && !it.isConsumed }
+                            if (next != null) {
+                                activeId = next.id
+                                origin = next.position
+                                knob = Offset.Zero
+                                onChange(0f, 0f)
+                                next.consume()
+                            } else {
+                                if (activeId != null) {
+                                    activeId = null
+                                    origin = null
+                                    knob = Offset.Zero
+                                    onChange(0f, 0f)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         ) {
             Canvas(modifier = Modifier.fillMaxSize()) {
+                val r = maxRadiusDp.toPx()
+                val restCenter = Offset(96.dp.toPx(), size.height - 96.dp.toPx())
+                val center = origin ?: restCenter
+                val active = origin != null
                 drawCircle(
-                    color = Color(0x44FFFFFF),
-                    radius = size.minDimension * 0.25f,
-                    style = Stroke(width = 1.dp.toPx())
+                    color = if (active) Color(0x331B222C) else Color(0x181B222C),
+                    radius = r,
+                    center = center
                 )
                 drawCircle(
-                    color = Color(0xCCD4AF37),
-                    radius = 26.dp.toPx(),
+                    color = if (active) Color(0x99D4AF37) else Color(0x38D4AF37),
+                    radius = r,
+                    center = center,
+                    style = Stroke(width = if (active) 2.dp.toPx() else 1.2.dp.toPx())
+                )
+                drawCircle(
+                    color = if (active) Color(0xDDD4AF37) else Color(0x44D4AF37),
+                    radius = 24.dp.toPx(),
                     center = center + knob
                 )
             }
