@@ -562,6 +562,10 @@ fn yaw_pos_mat(pos: [f32; 3], yaw: f32) -> Mat4 {
 
 impl DrivingState {
     pub fn step(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool) {
+        self.step_with_pitch(throttle, brake, steer, handbrake, 0.0);
+    }
+
+    pub fn step_with_pitch(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool, pitch: f32) {
         self.ticks = self.ticks.wrapping_add(1);
         // The chase camera, once per tick on the car's pose (the previous tick's: a one-tick lag vs
         // the game's end-of-frame update [S]); the pull-in ray is the collision grid's segment test.
@@ -604,7 +608,14 @@ impl DrivingState {
         if on_spline {
             // The spline block in `step_ai` owns the pose and the velocity this tick.
         } else if let Some((c, mesh, b)) = self.sub.as_mut() {
-            let si = nf_game::driving::sub_physics::SubInput { throttle: input.throttle, brake: input.brake, steer: input.steer, handbrake: input.handbrake, ..Default::default() };
+            let si = nf_game::driving::sub_physics::SubInput {
+                throttle: input.throttle,
+                brake: input.brake,
+                steer: input.steer,
+                handbrake: input.handbrake,
+                pitch: pitch.clamp(-1.0, 1.0),
+                ..Default::default()
+            };
             let _ = c.step_world(&si, &self.rigid, b, mesh, DT);
             let r = c.body.rows;
             self.car.pos = c.body.pos;
@@ -624,9 +635,9 @@ impl DrivingState {
         }
         self.step_fx();
         self.step_weapons();
-        self.step_pov();
         self.step_engine(input.throttle);
         self.step_ai(&input);
+        self.step_pov();
         self.step_hostiles();
     }
 
@@ -641,7 +652,8 @@ impl DrivingState {
         if !self.intro.as_ref().is_some_and(|(i, _)| i.pov) { return; }
         let zoom_scale = (p.fov_deg / 60.0).clamp(0.15, 1.0);
         let sens = 0.00045 * zoom_scale;
-        p.yaw_turns -= dx as f32 * sens;
+        // With `scene.mirror_x = true`, increasing yaw rotates toward screen right.
+        p.yaw_turns += dx as f32 * sens;
         p.pitch_turns -= dy as f32 * sens;
         p.arm.limits.clamp_view(&mut p.pitch_turns, &mut p.yaw_turns);
     }
@@ -917,6 +929,7 @@ impl DrivingState {
         let hostile_ids: Vec<usize> = self.hostiles.as_ref().map(|h| h.world.live.iter().map(|v| { ai.push((v.pos(), v.vel())); v.element }).collect()).unwrap_or_default();
         let mut hostile_hits: Vec<(usize, f32)> = Vec::new();
         let Some(wp) = self.weapons.as_mut() else { return };
+        wp.sys.reload_tick(now);
         if std::mem::take(&mut wp.cycle) { wp.sys.select(true, now, 60, false); }
         if std::mem::take(&mut wp.fire) {
             let k = wp.sys.secondary.max(0) as usize;
@@ -1015,10 +1028,15 @@ impl DrivingState {
         let ticks = self.ticks;
         let Some(h) = self.hud.as_mut() else { return f };
         let (hp, hm, ar, am) = h.health.hud();
+        let pov_weapon = if self.intro.as_ref().is_some_and(|(i, _)| i.pov) {
+            self.pov.as_ref().map(|p| (26i32, p.ammo))
+        } else {
+            None
+        };
         let input = nf_game::driving_hud_draw::HudInput {
             dt: ticks.saturating_sub(h.last_tick) as f32 / 60.0,
             health: hp, health_max: hm, armour: ar, armour_max: am,
-            weapon: self.weapons.as_ref().and_then(|w| { let k = w.sys.secondary; (k >= 0).then(|| (k, w.sys.slots[k as usize].ammo)) }),
+            weapon: pov_weapon.or_else(|| self.weapons.as_ref().and_then(|w| { let k = w.sys.secondary; (k >= 0).then(|| (k, w.sys.slots[k as usize].ammo)) })),
             timer: None, health_always: false, grunt_on_hit: false, suppressed: false,
             ticks, paused: false,
         };
@@ -1517,21 +1535,32 @@ impl DrivingState {
                 // and `ViewLimits::clamp_view` tracks the pursuing cars accurately.
                 if let Some(q) = i.spline_position(paths) {
                     let o = self.car.pos;
-                    let vx = (q[0] - o[0]) * 60.0;
-                    let vy = (q[1] - o[1]) * 60.0;
-                    let vz = (q[2] - o[2]) * 60.0;
-                    self.car.vel = [vx, vy, vz];
+                    let dx = q[0] - o[0];
+                    let dy = q[1] - o[1];
+                    let dz = q[2] - o[2];
+                    let jump = dx * dx + dy * dy + dz * dz > 225.0; // >15u teleport onto spline
                     self.car.pos = q;
-                    if vx * vx + vz * vz > 0.25 {
-                        let yaw = vx.atan2(vz);
-                        self.car.yaw = yaw;
-                        let (s, c) = (yaw.sin(), yaw.cos());
-                        self.car.rot = [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]];
+                    if jump {
+                        self.car.vel = [0.0; 3];
+                    } else {
+                        let vx = dx * 60.0;
+                        let vy = dy * 60.0;
+                        let vz = dz * 60.0;
+                        self.car.vel = [vx, vy, vz];
+                        if vx * vx + vz * vz > 0.25 {
+                            let yaw = vx.atan2(vz);
+                            self.car.yaw = yaw;
+                            let (s, c) = (yaw.sin(), yaw.cos());
+                            self.car.rot = [[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]];
+                        }
                     }
                 }
             }
         } else {
             let _events = self.mission.step(DT, &snap);
+        }
+        if self.hud.as_ref().is_some_and(|h| h.health.hud().0 <= 0.0) {
+            self.mission.state = MissionState::Failed;
         }
         self.mission_state = self.mission.state;
     }
@@ -2840,8 +2869,9 @@ pub fn load_driving_scene_at(iso_path: &str, viv_name: &str, game_difficulty: u3
         lights: nf_game::driving::ai::JunctionLights::new(0),
         ai_rng: nf_game::driving::ai::DriveRng::game_reset(),
         weapons: Some({
-            let mut sys = nf_game::driving::weapons::WeaponSystem::new(60, false);
-            nf_game::driving::weapons::default_loadout(&mut sys, false);
+            let underwater = viv_upper == "MIS11";
+            let mut sys = nf_game::driving::weapons::WeaponSystem::new(60, underwater);
+            nf_game::driving::weapons::default_loadout(&mut sys, underwater);
             DriveWeapons { sys, shots: Vec::new(), ai_damage: Vec::new(), fire: false, cycle: false }
         }),
         sub,
@@ -2871,6 +2901,13 @@ pub fn load_driving_scene_at(iso_path: &str, viv_name: &str, game_difficulty: u3
         car_box_centre,
         car_rig,
     };
+    // Prime MIS01's opening helicopter spline & POV sniper camera so frame 0 starts
+    // airborne on `path_Helicopter02` instead of sitting at street-level trigger 684.
+    let mut state = state;
+    if state.in_heli {
+        state.step(0.0, 0.0, 0.0, false);
+        state.step(0.0, 0.0, 0.0, false);
+    }
     Ok((scene, state))
 }
 

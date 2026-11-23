@@ -892,10 +892,12 @@ mod android_impl {
                 let just = b & !prev;
                 app.input.prev_buttons = b;
 
-                let throttle = (app.input.move_y.max(0.0) + if b & BTN_FIRE != 0 { 1.0 } else { 0.0 }).min(1.0);
-                let brake = ((-app.input.move_y).max(0.0) + if b & BTN_AIM != 0 { 1.0 } else { 0.0 }).min(1.0);
-                let steer = -app.input.move_x;
-                let handbrake = b & BTN_JUMP != 0;
+                let throttle = app.input.move_y.max(0.0);
+                let brake = (-app.input.move_y).max(0.0);
+                let steer = app.input.move_x;
+                let handbrake = b & BTN_JUMP != 0 && drv.sub.is_none();
+                let sub_pitch = if b & BTN_JUMP != 0 { 1.0 } else { 0.0 }
+                    - if b & BTN_CROUCH != 0 { 1.0 } else { 0.0 };
                 if drv.pov_active() {
                     let (dx, dy) = (
                         std::mem::take(&mut app.input.turn_accum),
@@ -911,9 +913,9 @@ mod android_impl {
                     drv.pov_scope(b & BTN_AIM != 0);
                 } else if let Some(w) = drv.weapons.as_mut() {
                     w.fire |= b & BTN_FIRE != 0;
-                    w.cycle |= just & BTN_RELOAD != 0;
+                    w.cycle |= just & (BTN_RELOAD | BTN_WEAP_NEXT | BTN_WEAP_PREV) != 0;
                 }
-                drv.step(throttle, brake, steer, handbrake);
+                drv.step_with_pitch(throttle, brake, steer, handbrake, sub_pitch);
                 app.cam.fov = drv.camera_fov().to_radians();
 
                 if matches!(
@@ -935,12 +937,22 @@ mod android_impl {
                             json_escape(state_str),
                             drv.ticks
                         ));
-                        // On failure, retry the current driving mission instead of kicking back to the Start screen;
-                        // on completion, advance Paris Prelude -> The Exchange or return to FrontEnd.
+                        // On failure, retry the current driving mission; on completion, advance to the next campaign mission.
+                        let arch_low = app.archive.to_ascii_lowercase();
                         pending_level = Some(if matches!(drv.mission_state, nf_game::driving::mission::MissionState::Failed) {
                             app.archive.clone()
-                        } else if app.archive.eq_ignore_ascii_case("09000001.bin") || app.archive.eq_ignore_ascii_case("MIS01") {
+                        } else if arch_low == "09000001.bin" || arch_low == "mis01" {
                             "07000005.bin".to_string()
+                        } else if arch_low == "09000005.bin" || arch_low == "mis3" {
+                            "09000006.bin".to_string()
+                        } else if arch_low == "09000006.bin" || arch_low == "mis4" {
+                            "07000001.bin".to_string()
+                        } else if arch_low == "09000002.bin" || arch_low == "mis11" {
+                            "09000003.bin".to_string()
+                        } else if arch_low == "09000003.bin" || arch_low == "mis13a" {
+                            "09000004.bin".to_string()
+                        } else if arch_low == "09000004.bin" || arch_low == "mis13b" {
+                            "07000014.bin".to_string()
                         } else {
                             "07000048.bin".to_string()
                         });
@@ -1141,7 +1153,7 @@ mod android_impl {
 
         let view = frame.texture.create_view(&Default::default());
         let aspect = gfx.config.width as f32 / gfx.config.height.max(1) as f32;
-        let (vp, vp_rot) = app.cam.view_proj(aspect);
+        let (vp, vp_rot) = app.cam.view_proj_for(aspect, app.scene.mirror_x);
 
         let door_closed = app.scene.sim.as_ref().map(|s| s.drones.doors.closed_flags());
         let vis = gfx.renderer.cel_visibility(
@@ -1177,6 +1189,11 @@ mod android_impl {
         gfx.renderer.sky_flash_mask = app.scene.sim.as_ref().map_or(0, |s| s.drones.sky.flash_mask);
         gfx.renderer.sky_spin = app.scene.sim.as_ref().map_or(0.0, |s| s.drones.sky.spin());
         gfx.renderer.set_shards(&gfx.queue, &app.scene.shard_draws());
+        if let Some(drv) = app.driving.as_mut() {
+            let (r, u) = nf_view::billboard_axes(&app.cam);
+            app.scene.drive_particles = drv.particle_groups(r, u);
+            drv.reflection_frame(&mut app.scene, r, u);
+        }
         gfx.renderer.set_particles(&gfx.queue, &nf_view::particles_for(&app.scene, &app.cam));
 
         // Step FrontEnd / intro / briefing MPEG-2 movie player BEFORE building menu_hud

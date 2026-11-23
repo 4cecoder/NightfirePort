@@ -4330,7 +4330,7 @@ impl App {
                 self.swap_in_scene(scene, load.ptp_return);
                 if let Some(drv) = &self.driving {
                     let (p, yaw, pitch) = drv.chase_camera();
-                    self.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: GAME_FOV };
+                    self.cam = Camera { pos: Vec3::new(p[0], p[1], p[2]), yaw, pitch, fov: drv.camera_fov().to_radians() };
                 }
                 // The level now running (GameState+0xc [M ResetMap_Load phase 2]). It was only ever
                 // set from the command line, so a mission reached through the menus still read as the
@@ -4352,7 +4352,7 @@ impl App {
                 // The mission takes the mouse on arrival. The briefing path closed its front end at
                 // the phase-2 resolve, BEFORE the level existed (close_front_end's grab saw no sim),
                 // so the level came up un-grabbed: no mouse look until a click, and Esc quit.
-                if load.next != menu::FRONTEND_LEVEL && self.fe.is_none() && self.scene.sim.is_some() { self.grab(true); }
+                if load.next != menu::FRONTEND_LEVEL && self.fe.is_none() && (self.scene.sim.is_some() || self.driving.is_some()) { self.grab(true); }
                 // frontend-music: `Sound_Ready`'s front-end case [M 0x1dceb8 case 0x7000048] — the
                 // load alternates bank 0xc (SBI slot 0 = SB_0, jingle 0x1d7) and 0x38 (slot 1 =
                 // SB_1, jingle 0x470) through DAT_002e1b11, then `MenuManager_Create` resets
@@ -5444,7 +5444,7 @@ impl App {
                 for (k, d) in [(KeyCode::KeyW, fwd), (KeyCode::KeyS, -fwd), (KeyCode::KeyD, right), (KeyCode::KeyA, -right), (KeyCode::Space, Vec3::Y), (KeyCode::ControlLeft, -Vec3::Y)] {
                     if self.keys.contains(&k) { mv += d; }
                 }
-                if self.noclip || self.scene.sim.is_none() { self.cam.pos += mv * speed; }
+                if self.noclip || (self.scene.sim.is_none() && self.driving.is_none()) { self.cam.pos += mv * speed; }
                 // One animation frame per 60 Hz game update (FRAME_RATE_MUL = 1), docs/formats/animation.md.
                 self.ticked = false;
                 self.poll_panel(dt);
@@ -6572,10 +6572,12 @@ impl App {
                         } else {
                             let t = if self.keys.contains(&KeyCode::KeyW) || self.keys.contains(&KeyCode::ArrowUp) { 1.0 } else { 0.0 };
                             let b = if self.keys.contains(&KeyCode::KeyS) || self.keys.contains(&KeyCode::ArrowDown) { 1.0 } else { 0.0 };
-                            let s = if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { 1.0 } else { 0.0 }
-                                - if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 };
+                            let s = if self.keys.contains(&KeyCode::KeyD) || self.keys.contains(&KeyCode::ArrowRight) { 1.0 } else { 0.0 }
+                                - if self.keys.contains(&KeyCode::KeyA) || self.keys.contains(&KeyCode::ArrowLeft) { 1.0 } else { 0.0 };
                             (t, b, s, self.keys.contains(&KeyCode::Space), false, false)
                         };
+                    let sub_pitch = if self.keys.contains(&KeyCode::KeyE) || self.keys.contains(&KeyCode::KeyR) || self.keys.contains(&KeyCode::PageUp) { 1.0 } else { 0.0 }
+                        - if self.keys.contains(&KeyCode::KeyC) || self.keys.contains(&KeyCode::KeyF) || self.keys.contains(&KeyCode::PageDown) { 1.0 } else { 0.0 };
                     // Weapons: Ctrl (or Left-click in POV sniper mode) fires; Right-click zooms sniper scope; Q cycles weapon.
                     if drv.pov_active() {
                         if let Some(ctrl) = self.live_bridge.as_mut().filter(|b| b.control.active).map(|b| &mut b.control) {
@@ -6594,7 +6596,7 @@ impl App {
                     }
                     self.prev_keys_q = self.keys.contains(&KeyCode::KeyQ);
                     for _ in 0..self.frame_ticks {
-                        drv.step(throttle, brake, steer, handbrake);
+                        drv.step_with_pitch(throttle, brake, steer, handbrake, sub_pitch);
                     }
                     if !self.noclip {
                         let (p, yaw, pitch) = drv.chase_camera();
@@ -7198,7 +7200,7 @@ impl App {
                         // mouse un-grabbed, and the un-grabbed Esc quit the game from inside a mission
                         // instead of pausing. Only the bare
                         // viewer (no mission) quits on an un-grabbed Esc.
-                        let in_mission = self.scene.sim.is_some() && self.level_code != 0 && self.level_code != menu::FRONTEND_LEVEL;
+                        let in_mission = (self.scene.sim.is_some() || self.driving.is_some()) && self.level_code != 0 && self.level_code != menu::FRONTEND_LEVEL;
                         let cinema = in_mission && self.scene.sim.as_ref().is_some_and(|s| s.script_camera().is_some());
                         if self.grabbed || in_mission {
                             // A refused pause keeps the mouse: the player is still in the mission.
@@ -7704,7 +7706,7 @@ impl ApplicationHandler for App {
                     if let Some(drv) = self.driving.as_mut() {
                         drv.pov_aim(dx, dy);
                     }
-                } else if self.noclip || self.scene.sim.is_none() {
+                } else if self.noclip || (self.scene.sim.is_none() && self.driving.is_none()) {
                     self.cam.yaw -= dx as f32 * MOUSE_SENSITIVITY;
                     self.cam.pitch = (self.cam.pitch - dy as f32 * MOUSE_SENSITIVITY).clamp(-1.55, 1.55);
                 } else {
