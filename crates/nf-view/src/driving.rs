@@ -1117,7 +1117,7 @@ impl DrivingState {
                 pitch,
                 fov: self.camera_fov().to_radians(),
             };
-            let (vp, _) = cam.view_proj(aspect);
+            let (vp, _) = cam.view_proj_for(aspect, scene.mirror_x);
             let vp_mat = glam::Mat4::from_cols_array_2d(&vp);
             let mut push_rect = |x0: f32, y0: f32, x1: f32, y1: f32, c: [f32; 4]| {
                 let v = |px: f32, py: f32| crate::gpu::HudVertex { p: [px, py], uv: [-1.0, -1.0], c };
