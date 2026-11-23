@@ -532,8 +532,12 @@ mod android_impl {
             return JNI_FALSE;
         };
         let t0 = Instant::now();
+        if let Some(s) = app.sound.as_mut() {
+            s.reset();
+        }
         match load_scene_for(&app.data_path, &name) {
-            Ok((scene, cam, fe, driving)) => {
+            Ok((mut scene, cam, fe, driving)) => {
+                let sound = build_sound(&mut scene);
                 let ms = t0.elapsed().as_millis();
                 emit_telemetry(format!(
                     "{{\"ev\":\"level_load\",\"archive\":{},\"ok\":true,\"ms\":{ms},\"cels\":{},\"textures\":{},\"sim\":{}}}",
@@ -544,9 +548,11 @@ mod android_impl {
                 ));
                 app.archive = name.clone();
                 app.scene = scene;
+                app.sound = sound;
                 app.cam = cam;
                 app.fe = fe;
                 app.driving = driving;
+                app.driving_end_ticks = None;
                 app.ticks = 0;
                 if let Some(gfx) = app.gfx.as_mut() {
                     gfx.renderer = Renderer::new(
@@ -1010,7 +1016,10 @@ mod android_impl {
                     if let Some(s) = app.sound.as_mut() {
                         sound_tick(s, sim);
                     }
-                    if let Some(next) = sim.drones.level_exit.take() {
+                    if let Some(end_to) = sim.drones.mission_end.take() {
+                        let resolved = nf_game::triggers::resolve_exit_code(nf_game::triggers::wrap_intro(end_to));
+                        pending_level = Some(format!("{resolved:08x}.bin"));
+                    } else if let Some(next) = sim.drones.level_exit.take() {
                         if sim.drones.exit_hold.is_some() {
                             sim.drones.level_exit = Some(next);
                         } else {
