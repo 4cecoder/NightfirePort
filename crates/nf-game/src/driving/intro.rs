@@ -432,7 +432,8 @@ impl IntroState {
     /// One 60 Hz sim step: the path player advances one path unit × the clock scale (taken as
     /// 1, [S]) and the letterbox runs one update (the HUD draws once per frame, [S]).
     pub fn step(&mut self) {
-        self.path.update(1.0);
+        let rate = if self.sim_rate > 0.01 { self.sim_rate } else { 1.0 };
+        self.path.update(rate);
         self.letterbox.tick();
     }
 

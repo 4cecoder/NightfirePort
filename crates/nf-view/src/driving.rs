@@ -949,8 +949,25 @@ impl DrivingState {
             keep.push(sh);
         }
         wp.shots = keep;
+        let mut bombvan_hit = false;
+        let fired_special = self.mission.script.as_ref().and_then(|s| s.special_weapon);
         if let Some(h) = self.hostiles.as_mut() {
-            for (e, a) in hostile_hits { h.world.damage(e, a); }
+            for (e, a) in hostile_hits {
+                h.world.damage(e, a);
+                if h.world.db.elements.get(e).is_some_and(|el| el.rec.name.to_ascii_lowercase().contains("bombvan")) {
+                    bombvan_hit = true;
+                }
+            }
+        }
+        if let Some(sc) = self.mission.script.as_mut() {
+            if bombvan_hit {
+                sc.emp_hit("paris_bombvan", true);
+            }
+            if let Some(sw) = fired_special {
+                if self.weapons.as_ref().is_some_and(|w| !w.shots.is_empty()) {
+                    sc.player_fired(sw);
+                }
+            }
         }
     }
 
@@ -1089,6 +1106,61 @@ impl DrivingState {
                     push_rect(-tx, -ry, tx, -gap_y, col);
                 }
             }
+        }
+        // 3D-projected enemy target brackets over live hostile vehicles (makes pursuers & bomb van
+        // immediately readable in MIS01 helicopter sniper POV and Vanquish chase).
+        if let Some(h) = self.hostiles.as_ref() {
+            let (eye, yaw, pitch) = self.chase_camera();
+            let cam = crate::Camera {
+                pos: glam::Vec3::new(eye[0], eye[1], eye[2]),
+                yaw,
+                pitch,
+                fov: self.camera_fov().to_radians(),
+            };
+            let (vp, _) = cam.view_proj(aspect);
+            let vp_mat = glam::Mat4::from_cols_array_2d(&vp);
+            let mut push_rect = |x0: f32, y0: f32, x1: f32, y1: f32, c: [f32; 4]| {
+                let v = |px: f32, py: f32| crate::gpu::HudVertex { p: [px, py], uv: [-1.0, -1.0], c };
+                let first = f.v.len() as u32;
+                f.v.extend_from_slice(&[v(x0, y1), v(x1, y1), v(x1, y0), v(x0, y1), v(x1, y0), v(x0, y0)]);
+                f.runs.push((0, 0, first, 6));
+            };
+            for v in &h.world.live {
+                if v.health <= 0.0 { continue; }
+                let is_friendly = h.world.db.elements.get(v.element)
+                    .is_some_and(|e| e.rec.name.to_ascii_lowercase().contains("paradis"));
+                if is_friendly { continue; }
+                let wp = v.pos();
+                let clip = vp_mat * glam::Vec4::new(wp[0], wp[1] + 1.0, wp[2], 1.0);
+                if clip.w <= 0.5 { continue; }
+                let nx = clip.x / clip.w;
+                let ny = clip.y / clip.w;
+                if nx.abs() > 0.96 || ny.abs() > 0.96 { continue; }
+                let is_bombvan = h.world.db.elements.get(v.element)
+                    .is_some_and(|e| e.rec.name.to_ascii_lowercase().contains("bombvan"));
+                let col = if is_bombvan { [1.0, 0.78, 0.15, 0.95] } else { [1.0, 0.22, 0.18, 0.9] };
+                let bx = 0.032 / aspect.max(1.0);
+                let by = 0.032;
+                let th_x = 0.004 / aspect.max(1.0);
+                let th_y = 0.004;
+                // Four crisp corner-style target brackets.
+                push_rect(nx - bx, ny + by - th_y, nx + bx, ny + by, col);
+                push_rect(nx - bx, ny - by, nx + bx, ny - by + th_y, col);
+                push_rect(nx - bx, ny - by, nx - bx + th_x, ny + by, col);
+                push_rect(nx + bx - th_x, ny - by, nx + bx, ny + by, col);
+            }
+        }
+        // Mission end visual indicator bar (crimson on Failed, gold on Complete).
+        if self.mission_state != MissionState::Playing {
+            let col = if self.mission_state == MissionState::Complete {
+                [0.85, 0.72, 0.20, 0.85]
+            } else {
+                [0.85, 0.15, 0.15, 0.85]
+            };
+            let v = |px: f32, py: f32| crate::gpu::HudVertex { p: [px, py], uv: [-1.0, -1.0], c: col };
+            let first = f.v.len() as u32;
+            f.v.extend_from_slice(&[v(-0.45, 0.08), v(0.45, 0.08), v(0.45, -0.08), v(-0.45, 0.08), v(0.45, -0.08), v(-0.45, -0.08)]);
+            f.runs.push((0, 0, first, 6));
         }
         f
     }
