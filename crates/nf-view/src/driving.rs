@@ -751,6 +751,9 @@ impl DrivingState {
                     }
                 }
             }
+            if p.ammo == 0 && now - p.last_shot_tick >= 45 {
+                p.ammo = 24;
+            }
             if std::mem::take(&mut p.fire) && p.ammo > 0 && now - p.last_shot_tick >= 5 {
                 p.ammo -= 1;
                 p.last_shot_tick = now;
@@ -758,6 +761,7 @@ impl DrivingState {
                 let (eye, yaw, pitch) = self.pov_eye_and_angles(&p);
                 let cp = pitch.cos();
                 let dir = [yaw.sin() * cp, pitch.sin(), yaw.cos() * cp];
+                let muzzle = [eye[0] + dir[0] * 1.5, eye[1] - 0.35 + dir[1] * 1.5, eye[2] + dir[2] * 1.5];
                 if let Some(h) = self.hostiles.as_mut() {
                     let targets: Vec<nf_game::driving::flight::ShotTarget> = h.world.live.iter().filter_map(|v| {
                         if v.health <= 0.0 { return None; }
@@ -769,10 +773,14 @@ impl DrivingState {
                         let radius = (3.5 + dist * 0.04).min(8.5);
                         Some(nf_game::driving::flight::ShotTarget { id: v.element, center: [vp[0], vp[1] + 0.6, vp[2]], radius })
                     }).collect();
-                    if let Some((elem, _, _)) = nf_game::driving::flight::nearest_hit(eye, dir, &targets) {
+                    if let Some((elem, impact, _)) = nf_game::driving::flight::nearest_hit(eye, dir, &targets) {
                         h.world.damage(elem, 50.0);
                         p.hit_flash_ticks = 14;
+                        h.tracers.push((muzzle, impact, 8));
                         eprintln!("[mis01 pov] sniper HIT element {elem} (ammo={})", p.ammo);
+                    } else {
+                        let miss_end = [eye[0] + dir[0] * 120.0, eye[1] + dir[1] * 120.0, eye[2] + dir[2] * 120.0];
+                        h.tracers.push((muzzle, miss_end, 7));
                     }
                 }
             }
@@ -1216,9 +1224,9 @@ impl DrivingState {
         if let Some(w) = self.weapons.as_ref().filter(|w| !w.shots.is_empty()) {
             let mut v = Vec::new();
             for sh in &w.shots {
-                let h = 0.35;
+                let h = 0.55;
                 let c = |sx: f32, sy: f32| [0, 1, 2].map(|k| sh.pos[k] + right[k] * h * sx + up[k] * h * sy);
-                let q = |p: [f32; 3]| Vertex { pos: p, uv: [0.0, 0.0], rgba: [255, 180, 80, 128], nrm: [0; 4] };
+                let q = |p: [f32; 3]| Vertex { pos: p, uv: [0.0, 0.0], rgba: [255, 210, 110, 220], nrm: [0; 4] };
                 let (a, b, cc, d) = (q(c(-1.0, 1.0)), q(c(1.0, 1.0)), q(c(1.0, -1.0)), q(c(-1.0, -1.0)));
                 v.extend_from_slice(&[a, b, cc, a, cc, d]);
             }
@@ -1255,11 +1263,12 @@ impl DrivingState {
             };
             for pr in &h.world.projectiles { glow(pr.p.pos, 0.45, [255, 120, 60, 128]); }
             for (a, b, _) in &h.tracers {
-                glow(*a, 0.3, [255, 230, 150, 128]);
-                for k in 1..=6 {
-                    let t = k as f32 / 6.0;
-                    glow([0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t), 0.12, [255, 210, 120, 96]);
+                glow(*a, 0.35, [255, 240, 180, 200]);
+                for k in 1..=10 {
+                    let t = k as f32 / 10.0;
+                    glow([0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t), 0.18, [255, 220, 130, 180]);
                 }
+                glow(*b, 0.55, [255, 180, 70, 220]);
             }
             shine.push((None, true, v));
         }
