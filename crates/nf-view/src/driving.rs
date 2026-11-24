@@ -2478,7 +2478,7 @@ pub fn load_driving_scene_at(iso_path: &str, viv_name: &str, game_difficulty: u3
                 let mut parts = Vec::new();
                 let Some(slot) = load_car_into_scene(&iso, base, &need.model, c, s, &mut vertices, &mut char_verts, &mut indices, &mut materials, &mut textures, &mut attachments, car_light_ref, Some(&mut parts)) else { break };
                 pool.slots.push(slot);
-                pool.rigs.push(vehicle_rig(&iso, viv_base, c, parts, &p));
+                pool.rigs.push(vehicle_rig(&iso, base, c, parts, &p));
             }
             if let Some(&s0) = pool.slots.first() {
                 if !heli {
@@ -2679,13 +2679,14 @@ pub fn load_driving_scene_at(iso_path: &str, viv_name: &str, game_difficulty: u3
         .and_then(|raw| maybe_decompress(&raw).ok())
         .and_then(|b| nf_formats::carmesh::car_mesh(&b).ok())
         .map(|mesh| {
-            let rig = nf_formats::carpose::WheelRig::new(&mesh, false);
+            let is_sub = p_stem == "vanquishsub";
+            let rig = nf_formats::carpose::WheelRig::new(&mesh, is_sub);
             let pose = nf_formats::carpose::CarPose::rest(&mesh);
             let attrs = nf_formats::carpose::WheelAttrs {
                 rest: car_params.spring_rest,
                 limit_draw: car_params.spring_limit,
                 wheel_radius: car_params.wheel_radius,
-                is_sub: false,
+                is_sub,
             };
             CarRig { mesh, rig, attrs, mem: Default::default(), pose, spin: [0.0; 2], parts: posed_parts.clone() }
         });

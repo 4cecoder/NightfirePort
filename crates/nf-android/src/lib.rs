@@ -35,6 +35,9 @@ mod android_impl {
     const BTN_WEAP_NEXT: i32 = 1 << 6;
     const BTN_WEAP_PREV: i32 = 1 << 7;
     const BTN_PAUSE: i32 = 1 << 8;
+    const BTN_ALT_FIRE: i32 = 1 << 9;
+    const BTN_GADGET: i32 = 1 << 10;
+    const BTN_GOGGLES: i32 = 1 << 11;
 
     static STATE: Mutex<Option<AndroidApp>> = Mutex::new(None);
     static LIVE_BRIDGE: OnceLock<Mutex<nf_view::live_bridge::LiveBridge>> = OnceLock::new();
@@ -877,13 +880,19 @@ mod android_impl {
             ran += 1;
             app.ticks = app.ticks.wrapping_add(1);
 
+            let mut close_fe = false;
             if let Some(fe) = app.fe.as_mut() {
                 fe.tick();
                 if let Some(req) = fe.requested_level.take() {
                     pending_level = Some(format!("{req:08x}.bin"));
                 } else if let Some(drv_code) = fe.launching_driving() {
                     pending_level = Some(format!("{drv_code:08x}.bin"));
+                } else if fe.closed && (app.scene.sim.is_some() || app.driving.is_some()) {
+                    close_fe = true;
                 }
+            }
+            if close_fe {
+                app.fe = None;
             }
 
             if let Some(drv) = app.driving.as_mut() {
@@ -978,10 +987,32 @@ mod android_impl {
                     };
 
                     // Allow skipping in-mission NIS cutscenes (e.g. Equinox intro) via USE, JUMP, or PAUSE.
-                    if sim.drones.scripts.cutscene_playing()
+                    let skipped_nis = if sim.drones.scripts.cutscene_playing()
                         && (just & (BTN_USE | BTN_JUMP | BTN_PAUSE) != 0)
                     {
                         sim.drones.scripts.skip_request = true;
+                        true
+                    } else {
+                        false
+                    };
+                    // Open authentic PS2 Page::Pause overlay when BTN_PAUSE is tapped during gameplay.
+                    if !skipped_nis && (just & BTN_PAUSE != 0) && !sim.drones.scripts.cutscene_playing() {
+                        let mut fe = menu::FrontEnd::new();
+                        let profile_dir = std::path::Path::new(&app.data_path)
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new(&app.data_path))
+                            .join("profiles");
+                        let _ = std::fs::create_dir_all(&profile_dir);
+                        fe.set_profile_dir(profile_dir);
+                        let code = u32::from_str_radix(app.archive.trim_end_matches(".bin"), 16).unwrap_or(0x0700_0005);
+                        fe.flow.current_level = code;
+                        fe.flow.stack = vec![menu::ST_RUNNER];
+                        if let Some(i) = menu::CAMPAIGN.iter().position(|c| c.3 == code) {
+                            fe.mission = i;
+                        }
+                        fe.open_pause();
+                        app.fe = Some(fe);
+                        break;
                     }
                     let in_keypad = sim.drones.keypad.is_some();
                     let keypad_nav = if in_keypad {
@@ -1008,15 +1039,15 @@ mod android_impl {
                         crouch_held: false,
                         aiming: b & BTN_AIM != 0,
                         weapon_cycle: weap_cycle,
-                        gadget_cycle: 0,
+                        gadget_cycle: if just & BTN_GADGET != 0 { 1 } else { 0 },
                         zoom_cycle: 0,
                         zoom_axis: 0.0,
                         switch_to: None,
                         fire: !in_keypad && (b & BTN_FIRE != 0),
                         zoom: b & BTN_AIM != 0,
                         scope: b & BTN_AIM != 0,
-                        mode_switch: false,
-                        goggles_action: false,
+                        mode_switch: just & BTN_ALT_FIRE != 0,
+                        goggles_action: just & BTN_GOGGLES != 0,
                         keypad_confirm: in_keypad && (b & (BTN_USE | BTN_FIRE) != 0),
                         keypad_back: in_keypad && (b & (BTN_CROUCH | BTN_RELOAD) != 0),
                         keypad_nav,
@@ -1027,6 +1058,21 @@ mod android_impl {
                     sim.step_bond(pi, fire, reload, use_key);
                     if let Some(s) = app.sound.as_mut() {
                         sound_tick(s, sim);
+                    }
+                    if sim.drones.fail_menu_open() && app.fe.is_none() {
+                        let mut fe = menu::FrontEnd::new();
+                        let profile_dir = std::path::Path::new(&app.data_path)
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new(&app.data_path))
+                            .join("profiles");
+                        let _ = std::fs::create_dir_all(&profile_dir);
+                        fe.set_profile_dir(profile_dir);
+                        let code = u32::from_str_radix(app.archive.trim_end_matches(".bin"), 16).unwrap_or(0x0700_0005);
+                        fe.flow.current_level = code;
+                        fe.flow.stack = vec![menu::ST_RUNNER];
+                        fe.mission_ended(menu::Outcome::Failed, menu::Stats::default());
+                        app.fe = Some(fe);
+                        break;
                     }
                     if let Some(end_to) = sim.drones.mission_end.take() {
                         let resolved = nf_game::triggers::resolve_exit_code(nf_game::triggers::wrap_intro(end_to));

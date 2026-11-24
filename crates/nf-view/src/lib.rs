@@ -4795,6 +4795,9 @@ impl App {
             self.pending_level = Some(code);
             // net-match-host: the settings ride with the level (same as menu_after).
             if let Some(st) = fe.mp_match_settings.take() { self.pending_mp_settings = Some(st); }
+        } else if let Some(code) = fe.launching_driving() {
+            fe.flow.pop_state();
+            self.pending_level = Some(code);
         }
         if fe.intro_playing {
             // The intro run (P_INTRO's boot logos / P_ESTHERO's START movie) owns the screen; its

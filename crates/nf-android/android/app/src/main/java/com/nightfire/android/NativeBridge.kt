@@ -16,6 +16,9 @@ object NativeBridge {
     const val BTN_WEAP_NEXT = 1 shl 6
     const val BTN_WEAP_PREV = 1 shl 7
     const val BTN_PAUSE = 1 shl 8
+    const val BTN_ALT_FIRE = 1 shl 9
+    const val BTN_GADGET = 1 shl 10
+    const val BTN_GOGGLES = 1 shl 11
 
     const val MENU_UP = 0
     const val MENU_DOWN = 1

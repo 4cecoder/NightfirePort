@@ -234,6 +234,22 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (inMenu) {
+            val action = when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> NativeBridge.MENU_UP
+                KeyEvent.KEYCODE_DPAD_DOWN -> NativeBridge.MENU_DOWN
+                KeyEvent.KEYCODE_DPAD_LEFT -> NativeBridge.MENU_LEFT
+                KeyEvent.KEYCODE_DPAD_RIGHT -> NativeBridge.MENU_RIGHT
+                KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_ENTER -> NativeBridge.MENU_CONFIRM
+                KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_BACK -> NativeBridge.MENU_BACK
+                KeyEvent.KEYCODE_BUTTON_X -> NativeBridge.MENU_SIDE
+                else -> -1
+            }
+            if (action >= 0) {
+                NativeBridge.nativeMenuAction(action)
+                return true
+            }
+        }
         val bit = keyToButton(keyCode)
         if (bit != 0) {
             padButtons = padButtons or bit
@@ -252,7 +268,8 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
     }
 
     private fun keyToButton(keyCode: Int): Int = when (keyCode) {
-        KeyEvent.KEYCODE_BUTTON_R2, KeyEvent.KEYCODE_BUTTON_R1 -> NativeBridge.BTN_FIRE
+        KeyEvent.KEYCODE_BUTTON_R2 -> NativeBridge.BTN_FIRE
+        KeyEvent.KEYCODE_BUTTON_R1 -> NativeBridge.BTN_ALT_FIRE
         KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_BUTTON_L1 -> NativeBridge.BTN_AIM
         KeyEvent.KEYCODE_BUTTON_A -> NativeBridge.BTN_JUMP
         KeyEvent.KEYCODE_BUTTON_B -> NativeBridge.BTN_CROUCH
@@ -260,6 +277,9 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
         KeyEvent.KEYCODE_BUTTON_Y -> NativeBridge.BTN_USE
         KeyEvent.KEYCODE_DPAD_RIGHT -> NativeBridge.BTN_WEAP_NEXT
         KeyEvent.KEYCODE_DPAD_LEFT -> NativeBridge.BTN_WEAP_PREV
+        KeyEvent.KEYCODE_DPAD_UP -> NativeBridge.BTN_GADGET
+        KeyEvent.KEYCODE_DPAD_DOWN -> NativeBridge.BTN_GOGGLES
+        KeyEvent.KEYCODE_BUTTON_START -> NativeBridge.BTN_PAUSE
         else -> 0
     }
 
@@ -665,11 +685,15 @@ class MainActivity : ComponentActivity(), Choreographer.FrameCallback {
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Weapon switch pill
+                // Weapon, Q-Gadget, Goggles, Alt-Fire, Pause row
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    HoldChip("PAUSE", NativeBridge.BTN_PAUSE)
+                    HoldChip("GOGGLES", NativeBridge.BTN_GOGGLES)
+                    HoldChip("Q-GAD", NativeBridge.BTN_GADGET)
+                    HoldChip("ALT", NativeBridge.BTN_ALT_FIRE)
                     HoldChip("◀ WEP", NativeBridge.BTN_WEAP_PREV)
                     HoldChip("WEP ▶", NativeBridge.BTN_WEAP_NEXT)
                 }
