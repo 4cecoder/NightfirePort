@@ -165,7 +165,7 @@ pub struct MissionSet {
 impl MissionSet {
     pub fn parse(data: &[u8]) -> MissionSet {
         let le = |o: usize| i32::from_le_bytes(data.get(o..o + 4).map_or([0; 4], |b| b.try_into().unwrap()));
-        let name_end = data.iter().take(0x2c).position(|&b| b == 0).unwrap_or(0x2c);
+        let name_end = data.iter().take(0x2c).position(|&b| b == 0).unwrap_or(data.len().min(0x2c));
         let name = String::from_utf8_lossy(&data[..name_end]).to_string();
         let mut enabled = [false; 32];
         for (i, e) in enabled.iter_mut().enumerate() {

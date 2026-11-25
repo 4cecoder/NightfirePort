@@ -693,6 +693,10 @@ mod android_impl {
                             drv.car.pos = [*x, *y, *z];
                             drv.car.vel = [0.0; 3];
                             if let Some(yw) = yaw { drv.car.yaw = *yw; }
+                            if let Some((ref mut c, _, _)) = drv.sub {
+                                c.body.pos = [*x, *y, *z];
+                                c.body.vel = [0.0; 3];
+                            }
                         } else if let Some(sim) = app.scene.sim.as_mut() {
                             sim.bond.pos = [*x, *y, *z];
                             sim.bond.vel = [0.0; 3];

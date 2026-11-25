@@ -3906,6 +3906,9 @@ impl App {
             // session as the lockstep gate (also run every frame: the client's start arrives
             // on a lobby tick, not an action — `adopt_lobby_session`).
             self.adopt_lobby_session();
+        } else if let Some(code) = fe.launching_driving() {
+            fe.flow.pop_state();
+            self.pending_level = Some(code);
         }
         // The pause page's Resume row (cursor 0) closes the menu [M C_GCPAUSE_Handler
         // 0x204408 — the game's resume is its own row]: the host consumes the flag and
@@ -4324,6 +4327,8 @@ impl App {
                 // A driving mission ending hands back to the front end with no menu state left
                 // (the drive replaced the scene); only that hand-off rebuilds the front end below.
                 let from_drive = self.driving.is_some();
+                let prev_level_code = self.level_code;
+                let drive_return = load.ptp_return.clone();
                 self.driving = drv;
                 if let Some(d) = self.driving.as_mut() { d.start_audio(); }
                 self.driving_end_ticks = None;
@@ -4367,6 +4372,12 @@ impl App {
                         fe.set_opts(opts);
                         (fe.screen_x, fe.screen_y) = self.screen_pos;
                         self.inherit_profile_session(&mut fe);
+                        if let Some(ret) = drive_return {
+                            fe.flow.stack = vec![menu::ST_RUNNER];
+                            fe.flow.current_level = prev_level_code;
+                            let outcome = if ret.status_byte == 0 { menu::Outcome::Complete } else { menu::Outcome::Failed };
+                            fe.mission_ended(outcome, menu::Stats::default());
+                        }
                         self.fe = Some(fe);
                     }
                     if let Some(fe) = self.fe.as_mut() {
@@ -7414,6 +7425,10 @@ impl App {
                         drv.car.pos = [*x, *y, *z];
                         drv.car.vel = [0.0; 3];
                         if let Some(yw) = yaw { drv.car.yaw = *yw; }
+                        if let Some((ref mut c, _, _)) = drv.sub {
+                            c.body.pos = [*x, *y, *z];
+                            c.body.vel = [0.0; 3];
+                        }
                     } else if let Some(sim) = self.scene.sim.as_mut() {
                         sim.bond.pos = [*x, *y, *z];
                         sim.bond.vel = [0.0; 3];

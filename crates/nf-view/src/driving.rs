@@ -939,14 +939,46 @@ impl DrivingState {
         let Some(wp) = self.weapons.as_mut() else { return };
         wp.sys.reload_tick(now);
         if std::mem::take(&mut wp.cycle) { wp.sys.select(true, now, 60, false); }
+        let mut boost_activated = false;
         if std::mem::take(&mut wp.fire) {
             let k = wp.sys.secondary.max(0) as usize;
             if let w::FireResult::Fired { barrels, .. } = wp.sys.fire(k, now, &w::FireCtx { barrel_ready: true, ..Default::default() }) {
-                for _ in 0..barrels.len().max(1) {
-                    let pp = w::launch_params(k, speed, 0.0, 60, w::Launcher::Player);
-                    let pos = [car_pos[0] + fwd[0] * 2.5, car_pos[1] + fwd[1] * 2.5 + 0.5, car_pos[2] + fwd[2] * 2.5];
-                    wp.shots.push(w::Projectile::launch(k, pp, pos, fwd, now));
+                if k == w::Q_BOOSTER {
+                    boost_activated = true;
+                } else if matches!(
+                    k,
+                    w::GUN
+                        | w::ROCKET
+                        | w::MISSILE
+                        | w::Q_PULSE
+                        | w::LASER
+                        | w::CANNON
+                        | w::GRENADE
+                        | w::TORPEDO
+                        | w::REMOTE_TORPEDO
+                        | w::FLOATING_MINE
+                        | w::SNOWMOBILE_GUN
+                        | w::SNOWMOBILE_ROCKET
+                        | w::ULTRALIGHT_GUN
+                        | w::ULTRALIGHT_ROCKET
+                        | w::FOD_GUN
+                        | w::FOD_ROCKET
+                        | w::CH6_REMOTE_ROCKET
+                ) {
+                    for _ in 0..barrels.len().max(1) {
+                        let pp = w::launch_params(k, speed, 0.0, 60, w::Launcher::Player);
+                        let pos = [car_pos[0] + fwd[0] * 2.5, car_pos[1] + fwd[1] * 2.5 + 0.5, car_pos[2] + fwd[2] * 2.5];
+                        wp.shots.push(w::Projectile::launch(k, pp, pos, fwd, now));
+                    }
                 }
+            }
+        }
+        if boost_activated {
+            if let Some((ref mut c, _, _)) = self.sub {
+                c.boost_timer = c.boost_timer.max(120);
+            }
+            for i in 0..3 {
+                self.car.vel[i] += fwd[i] * 12.0;
             }
         }
         if wp.ai_damage.len() != n_traffic { wp.ai_damage.resize(n_traffic, 0.0); }
@@ -1028,12 +1060,20 @@ impl DrivingState {
         out.send(cmds);
     }
 
-    /// This frame's HUD overlay: the ported passes' sprites on the game's 640x448 screen, kept 4:3
-    /// at the window's height (the on-foot HUD's mapping). Text and panels wait for the driving
-    /// font (not drawn yet) [S].
+    /// Active mission countdown/countup timer for the driving HUD (`(seconds, is_countdown)`).
+    pub fn active_hud_timer(&self) -> Option<(i32, bool)> {
+        let sc = self.mission.script.as_ref()?;
+        let t = sc.timers.iter().find(|t| t.running)?;
+        let secs = (t.peek(sc.now) / nf_game::driving::script::TICKS_PER_SECOND).max(0);
+        Some((secs, t.rate < 0))
+    }
+
+    /// This frame's HUD overlay: the ported passes' sprites and panels on the game's 640x448
+    /// screen, kept 4:3 at the window's height (the on-foot HUD's mapping).
     pub fn hud_frame(&mut self, scene: &Scene, aspect: f32) -> crate::gpu::HudFrame {
         let mut f = crate::gpu::HudFrame::default();
         let ticks = self.ticks;
+        let timer = self.active_hud_timer();
         let Some(h) = self.hud.as_mut() else { return f };
         let (hp, hm, ar, am) = h.health.hud();
         let pov_weapon = if self.intro.as_ref().is_some_and(|(i, _)| i.pov) {
@@ -1045,7 +1085,7 @@ impl DrivingState {
             dt: ticks.saturating_sub(h.last_tick) as f32 / 60.0,
             health: hp, health_max: hm, armour: ar, armour_max: am,
             weapon: pov_weapon.or_else(|| self.weapons.as_ref().and_then(|w| { let k = w.sys.secondary; (k >= 0).then(|| (k, w.sys.slots[k as usize].ammo)) })),
-            timer: None, health_always: false, grunt_on_hit: false, suppressed: false,
+            timer, health_always: false, grunt_on_hit: false, suppressed: false,
             ticks, paused: false,
         };
         h.last_tick = ticks;
@@ -1065,18 +1105,32 @@ impl DrivingState {
             [nx, (1.0 - y / 224.0) * sy]
         };
         for d in out.draws {
-            let nf_game::driving_hud_draw::HudDraw::Sprite { x, y, w, h: hh, uv, sheet, colour, .. } = d else { continue };
-            let Some(&(_, hash)) = h.sheets.iter().find(|(i, _)| *i == sheet) else { continue };
-            let Some(ti) = scene.hud_textures.iter().position(|(k, _)| *k == hash) else { continue };
-            // GS colour word (R G B A bytes, 0x80 = 1.0).
-            let c = [0, 8, 16, 24].map(|b| ((colour >> b) & 0xff) as f32 / 128.0);
-            let c = [c[0], c[1], c[2], c[3].min(1.0)];
-            let cx = x + w * 0.5;
-            let (a, b) = (ndc_anchored(x, y, cx), ndc_anchored(x + w, y + hh, cx));
-            let v = |p: [f32; 2], t: [f32; 2]| crate::gpu::HudVertex { p, uv: t, c };
-            let first = f.v.len() as u32;
-            f.v.extend_from_slice(&[v([a[0], a[1]], [uv[0], uv[1]]), v([b[0], a[1]], [uv[2], uv[1]]), v([b[0], b[1]], [uv[2], uv[3]]), v([a[0], a[1]], [uv[0], uv[1]]), v([b[0], b[1]], [uv[2], uv[3]]), v([a[0], b[1]], [uv[0], uv[3]])]);
-            f.runs.push((ti + 1, 0, first, 6));
+            match d {
+                nf_game::driving_hud_draw::HudDraw::Sprite { x, y, w, h: hh, uv, sheet, colour, .. } => {
+                    let Some(&(_, hash)) = h.sheets.iter().find(|(i, _)| *i == sheet) else { continue };
+                    let Some(ti) = scene.hud_textures.iter().position(|(k, _)| *k == hash) else { continue };
+                    // GS colour word (R G B A bytes, 0x80 = 1.0).
+                    let c = [0, 8, 16, 24].map(|b| ((colour >> b) & 0xff) as f32 / 128.0);
+                    let c = [c[0], c[1], c[2], c[3].min(1.0)];
+                    let cx = x + w * 0.5;
+                    let (a, b) = (ndc_anchored(x, y, cx), ndc_anchored(x + w, y + hh, cx));
+                    let v = |p: [f32; 2], t: [f32; 2]| crate::gpu::HudVertex { p, uv: t, c };
+                    let first = f.v.len() as u32;
+                    f.v.extend_from_slice(&[v([a[0], a[1]], [uv[0], uv[1]]), v([b[0], a[1]], [uv[2], uv[1]]), v([b[0], b[1]], [uv[2], uv[3]]), v([a[0], a[1]], [uv[0], uv[1]]), v([b[0], b[1]], [uv[2], uv[3]]), v([a[0], b[1]], [uv[0], uv[3]])]);
+                    f.runs.push((ti + 1, 0, first, 6));
+                }
+                nf_game::driving_hud_draw::HudDraw::Panel { x, y, w, h: hh, colour } => {
+                    let c = [0, 8, 16, 24].map(|b| ((colour >> b) & 0xff) as f32 / 128.0);
+                    let c = [c[0], c[1], c[2], c[3].min(1.0)];
+                    let cx = x + w * 0.5;
+                    let (a, b) = (ndc_anchored(x, y, cx), ndc_anchored(x + w, y + hh, cx));
+                    let v = |p: [f32; 2]| crate::gpu::HudVertex { p, uv: [-1.0, -1.0], c };
+                    let first = f.v.len() as u32;
+                    f.v.extend_from_slice(&[v([a[0], a[1]]), v([b[0], a[1]]), v([b[0], b[1]]), v([a[0], a[1]]), v([b[0], b[1]]), v([a[0], b[1]])]);
+                    f.runs.push((0, 0, first, 6));
+                }
+                nf_game::driving_hud_draw::HudDraw::Text { .. } => {}
+            }
         }
         // The letterbox bars: y 0 and y 448 - h, the HUD width, colour 0x7f000000 [M 0x245190].
         if let Some(bh) = self.intro.as_ref().and_then(|(i, _)| i.letterbox.bar_height(false)) {
@@ -1388,7 +1442,7 @@ impl DrivingState {
         // Watercraft (`MIS11`, `MIS13C`) and aerial rotor (`MIS13A`, `MIS13B`) passes.
         let mut speed = (self.car.vel[0].powi(2) + self.car.vel[2].powi(2)).sqrt();
         match self.viv.as_str() {
-            "MIS11" | "MIS13C" => {
+            "MIS11" | "MIS13C" if self.sub.is_none() => {
                 let thrust = watercraft_longitudinal_thrust(
                     input.throttle,
                     self.car.params.maxacc,
@@ -1981,6 +2035,32 @@ pub fn load_driving_scene(iso_path: &str, viv_name: &str) -> Result<(Scene, Driv
 /// PTP word 0x100984 [M Boot_GetPTPData 0x1c8198:13-21; the Paris mini-mission's forced 1 is not
 /// reachable from the port's menus], DRIVING main remaps it to 0..2 in place [M 0x174bf0:70-81]
 /// and the mission object keeps that at +0x3b8 [M 0x204de8:67-69].
+fn build_driving_weapons(mset: Option<&nf_game::driving::mission::MissionSet>, underwater: bool) -> DriveWeapons {
+    use nf_game::driving::weapons as w;
+    let mut sys = w::WeaponSystem::new(60, underwater);
+    if let Some(ms) = mset {
+        let mut cfg = [w::LoadoutEntry::default(); w::WEAPON_COUNT];
+        let mut any_vehicle_weapon = false;
+        for i in 0..w::WEAPON_COUNT {
+            cfg[i] = w::LoadoutEntry {
+                enabled: ms.enabled[i],
+                ammo: ms.target[i],
+                clip: ms.param2[i],
+                damage: ms.param3[i],
+            };
+            if i != w::P2K && ms.enabled[i] && ms.target[i] > 0 && ms.target[i] < 10001 {
+                any_vehicle_weapon = true;
+            }
+        }
+        if any_vehicle_weapon {
+            w::mission_loadout(&mut sys, &cfg, false);
+            return DriveWeapons { sys, shots: Vec::new(), ai_damage: Vec::new(), fire: false, cycle: false };
+        }
+    }
+    w::default_loadout(&mut sys, underwater);
+    DriveWeapons { sys, shots: Vec::new(), ai_damage: Vec::new(), fire: false, cycle: false }
+}
+
 pub fn load_driving_scene_at(iso_path: &str, viv_name: &str, game_difficulty: u32) -> Result<(Scene, DrivingState)> {
     let viv_upper = viv_name
         .trim_end_matches(".VIV")
@@ -2878,12 +2958,7 @@ pub fn load_driving_scene_at(iso_path: &str, viv_name: &str, game_difficulty: u3
         })(),
         lights: nf_game::driving::ai::JunctionLights::new(0),
         ai_rng: nf_game::driving::ai::DriveRng::game_reset(),
-        weapons: Some({
-            let underwater = viv_upper == "MIS11";
-            let mut sys = nf_game::driving::weapons::WeaponSystem::new(60, underwater);
-            nf_game::driving::weapons::default_loadout(&mut sys, underwater);
-            DriveWeapons { sys, shots: Vec::new(), ai_damage: Vec::new(), fire: false, cycle: false }
-        }),
+        weapons: Some(build_driving_weapons(mission.set.as_ref(), viv_upper == "MIS11")),
         sub,
         intro: nf_formats::drivepath::map_paths(&crp).ok().map(|p| (nf_game::driving::intro::IntroState::new(60), p)),
         viv: viv_upper,
@@ -3008,5 +3083,193 @@ mod tests {
         state.viv = "MIS13A".into();
         for _ in 0..120 { state.step(1.0, 0.0, 0.0, false); }
         assert!(state.rotor_spin > 0.0 && state.rotor_spin <= 1.0, "spin {}", state.rotor_spin);
+    }
+
+    fn base_test_state(viv: &str) -> DrivingState {
+        DrivingState {
+            viv: viv.into(),
+            car: Car::new(CarParams::vanquish(), [0.0, 0.0, 0.0], 0.0),
+            world: FlatWorld::paved(),
+            rigid: Rigid::game_defaults(),
+            crp_bytes: Vec::new(),
+            road_nodes: Vec::new(),
+            collision: CollisionGrid::build(Vec::new()),
+            ai_cars: Vec::new(),
+            ai_rigs: Vec::new(),
+            player_attach_slot: None,
+            mission: Mission::load(&[], None, 3),
+            mission_state: MissionState::Playing,
+            triggers: Vec::new(),
+            triggered: Vec::new(),
+            progress: 0,
+            rotor_spin: 0.0,
+            wheels: [SusWheel::default(); 4],
+            sus_params: SusParams::VANQUISH,
+            ticks: 10,
+            cam: None,
+            cam_view: None,
+            land: None,
+            car_box_centre: [0.0; 3],
+            car_rig: None,
+            fx: None,
+            reset: None,
+            hud: None,
+            shine: None,
+            reflection: None,
+            engine: None,
+            weapons: None,
+            glares: None,
+            lights: nf_game::driving::ai::JunctionLights::new(0),
+            ai_rng: nf_game::driving::ai::DriveRng::game_reset(),
+            sub: None,
+            intro: None,
+            hostiles: None,
+            difficulty: 1,
+            rule_log: Default::default(),
+            trigger_log: Default::default(),
+            pov: None,
+            in_heli: false,
+        }
+    }
+
+    #[test]
+    fn step_weapons_q_booster_boosts_instead_of_shooting() {
+        use nf_game::driving::weapons as w;
+        let mut state = base_test_state("MIS01");
+        let mut sys = w::WeaponSystem::new(60, false);
+        w::default_loadout(&mut sys, false);
+        sys.secondary = w::Q_BOOSTER as i32;
+        state.weapons = Some(DriveWeapons { sys, shots: Vec::new(), ai_damage: Vec::new(), fire: true, cycle: false });
+        let v0 = state.car.vel[2];
+        state.step_weapons();
+        assert!(state.weapons.as_ref().unwrap().shots.is_empty(), "Q-Booster must not spawn a rocket projectile");
+        assert!(state.car.vel[2] > v0 + 1.0, "Q-Booster must boost forward car velocity (got {})", state.car.vel[2]);
+
+        // Also verify SubCraft boost_timer is armed when sub is present.
+        let mut sub_state = base_test_state("MIS11");
+        let sub_craft = nf_game::driving::sub_physics::SubCraft::new(
+            nf_game::driving::sub_physics::VehicleAttrs::parse_atr(""),
+            [1.0, 0.6, 2.2],
+            [0.0, 0.0, 0.0],
+            0.0,
+            0,
+        );
+        sub_state.sub = Some((
+            sub_craft,
+            nf_game::driving::sub_collide::WorldMesh::new(std::iter::empty()),
+            nf_game::driving::sub_collide::Building::game_defaults(),
+        ));
+        let mut sys2 = w::WeaponSystem::new(60, true);
+        w::default_loadout(&mut sys2, true);
+        sys2.secondary = w::Q_BOOSTER as i32;
+        sub_state.weapons = Some(DriveWeapons { sys: sys2, shots: Vec::new(), ai_damage: Vec::new(), fire: true, cycle: false });
+        sub_state.step_weapons();
+        assert!(sub_state.weapons.as_ref().unwrap().shots.is_empty(), "Sub Q-Booster must not spawn a projectile");
+        assert!(sub_state.sub.as_ref().unwrap().0.boost_timer > 0, "Sub Q-Booster must arm SubCraft::boost_timer");
+    }
+
+    #[test]
+    fn step_weapons_non_projectile_gadgets_do_not_spawn_rockets() {
+        use nf_game::driving::weapons as w;
+        for &gadget in &[w::Q_SMOKE, w::Q_SLICK, w::RADAR, w::Q_VISION, w::TWO_WHEELS] {
+            let mut state = base_test_state("MIS01");
+            let mut sys = w::WeaponSystem::new(60, false);
+            w::default_loadout(&mut sys, false);
+            sys.pickup(gadget, 10, 0, 0, false);
+            sys.secondary = gadget as i32;
+            state.weapons = Some(DriveWeapons { sys, shots: Vec::new(), ai_damage: Vec::new(), fire: true, cycle: false });
+            state.step_weapons();
+            assert!(state.weapons.as_ref().unwrap().shots.is_empty(), "gadget {gadget} must not spawn a forward rocket");
+        }
+        // Real projectile weapons (Rocket, Q-Pulse) still spawn shots.
+        for &proj in &[w::ROCKET, w::Q_PULSE] {
+            let mut state = base_test_state("MIS01");
+            let mut sys = w::WeaponSystem::new(60, false);
+            w::default_loadout(&mut sys, false);
+            sys.secondary = proj as i32;
+            state.weapons = Some(DriveWeapons { sys, shots: Vec::new(), ai_damage: Vec::new(), fire: true, cycle: false });
+            state.step_weapons();
+            assert!(!state.weapons.as_ref().unwrap().shots.is_empty(), "weapon {proj} must spawn a projectile");
+        }
+    }
+
+    #[test]
+    fn pov_sniper_aim_sign_and_auto_reload() {
+        let mut state = base_test_state("MIS01");
+        let mut intro = nf_game::driving::intro::IntroState::new(60);
+        intro.pov = true;
+        state.intro = Some((intro, nf_formats::drivepath::MapPaths::default()));
+        state.pov = Some(DrivePov::new(nf_game::driving::flight::AimArm::from_ini("", "CopterAutoDriveCam:Arm0")));
+        let yaw0 = state.pov.as_ref().unwrap().yaw_turns;
+        state.pov_aim(100.0, 0.0);
+        assert!(state.pov.as_ref().unwrap().yaw_turns > yaw0, "positive mouse dx must turn right");
+
+        // Firing consumes ammo and sets flash; empty clip reloads after 45 ticks.
+        state.pov.as_mut().unwrap().ammo = 1;
+        state.ticks = 100;
+        state.pov_fire();
+        state.step_pov();
+        assert_eq!(state.pov.as_ref().unwrap().ammo, 0);
+        assert!(state.pov.as_ref().unwrap().fire_flash_ticks > 0);
+        state.ticks = 144;
+        state.step_pov();
+        assert_eq!(state.pov.as_ref().unwrap().ammo, 0);
+        state.ticks = 145;
+        state.step_pov();
+        assert_eq!(state.pov.as_ref().unwrap().ammo, 24);
+    }
+
+    #[test]
+    fn watercraft_fallback_skipped_when_sub_present() {
+        let mut state = base_test_state("MIS11");
+        let sub_craft = nf_game::driving::sub_physics::SubCraft::new(
+            nf_game::driving::sub_physics::VehicleAttrs::parse_atr(""),
+            [1.0, 0.6, 2.2],
+            [0.0, 0.0, 0.0],
+            0.0,
+            0,
+        );
+        state.sub = Some((
+            sub_craft,
+            nf_game::driving::sub_collide::WorldMesh::new(std::iter::empty()),
+            nf_game::driving::sub_collide::Building::game_defaults(),
+        ));
+        state.car.vel = [0.0; 3];
+        state.step_ai(&CarInput { throttle: 1.0, ..Default::default() });
+        assert_eq!(state.car.vel, [0.0; 3], "MIS11 with SubCraft must not apply flat watercraft fallback to car.vel");
+    }
+
+    #[test]
+    fn active_hud_timer_reads_running_script_timer() {
+        let mut state = base_test_state("MIS01");
+        let mut sc = nf_game::driving::script::DriveScript::new(nf_formats::trackstart::MapScript::default());
+        sc.now = 120;
+        sc.timers[0] = nf_game::driving::script::Timer {
+            running: true,
+            beep: false,
+            start: 60,
+            value: 600, // 10s
+            rate: -1,   // countdown
+            last_second: 10,
+        };
+        state.mission.script = Some(sc);
+        // At now=120, start=60, value=600, rate=-1 -> peek = 540 ticks = 9s, countdown=true.
+        assert_eq!(state.active_hud_timer(), Some((9, true)));
+    }
+
+    #[test]
+    fn build_driving_weapons_uses_mset_and_falls_back_to_default() {
+        use nf_game::driving::weapons as w;
+        // Fallback when MSet is None: underwater picks Torpedo, land picks Rocket.
+        assert_eq!(build_driving_weapons(None, true).sys.secondary, w::TORPEDO as i32);
+        assert_eq!(build_driving_weapons(None, false).sys.secondary, w::ROCKET as i32);
+
+        // When MSet specifies Snowmobile rockets (25), mission_loadout picks it.
+        let mut ms = nf_game::driving::mission::MissionSet::parse(&[]);
+        ms.enabled[w::SNOWMOBILE_ROCKET] = true;
+        ms.target[w::SNOWMOBILE_ROCKET] = 12;
+        let wp = build_driving_weapons(Some(&ms), false);
+        assert_eq!(wp.sys.secondary, w::SNOWMOBILE_ROCKET as i32);
+        assert_eq!(wp.sys.slots[w::SNOWMOBILE_ROCKET].ammo, 12);
     }
 }
